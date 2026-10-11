@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "api": "uvicorn api.main:app --reload"
   },
   "dependencies": {
     "katex": "^0.16.11",
