@@ -18,7 +18,7 @@ then the bigger moves (expanding brackets).
 
 from typing import Callable, Optional, Tuple
 
-from sympy import Add, Mul, S, collect, expand, srepr
+from sympy import Add, Mul, Pow, S, collect, expand, srepr
 from sympy.core.expr import Expr
 
 # A rule takes an expression and either returns (new_expression, step_name)
@@ -94,6 +94,11 @@ def eval_numbers(expr: Expr):
     done = [_calculate(term) for term in numbers]
     total = Add(*done) if expr.is_Add else Mul(*done)
 
+    # Nothing useful to do: adding 0, or multiplying by 1, changes nothing
+    # (and rebuilding would only shuffle the display around).
+    if (expr.is_Add and total == 0) or (expr.is_Mul and total == 1):
+        return None
+
     # Build the result in reading order:
     #   sums   -> numbers last    (2*x + 3*x + 4)
     #   products -> number first  (6*x, not x 6)
@@ -156,12 +161,24 @@ def tidy_powers(expr: Expr):
 # ---------------------------------------------------------------------------
 # Rule 5 -- brackets
 # ---------------------------------------------------------------------------
+def _has_denominator(expr: Expr) -> bool:
+    """Is there a division anywhere in here (a power with a minus sign)?"""
+    if isinstance(expr, Pow) and expr.exp.is_Number and expr.exp.is_negative:
+        return True
+    return any(_has_denominator(part) for part in expr.args)
+
+
 def expand_brackets(expr: Expr):
     """Multiply a bracket out.
 
         2 * (x + 3)    ->  2*x + 6               "Expand brackets"
         (x + 1)^2      ->  x^2 + 2*x + 1         "Expand brackets"
     """
+    # Never expand across a division: splitting  (x+y)/(x*y)  into
+    # x/(x*y) + y/(x*y) is a step backwards.
+    if _has_denominator(expr):
+        return None
+
     new = expand(expr)
     if not _changed(expr, new):
         return None

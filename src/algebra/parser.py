@@ -20,7 +20,7 @@ Two important jobs happen here:
 
 import re
 
-from sympy import Eq, Expr
+from sympy import Eq, Expr, Mul
 from sympy.parsing.sympy_parser import (
     convert_xor,
     implicit_multiplication_application,
@@ -51,6 +51,31 @@ def _check_input(text: str) -> None:
         )
 
 
+def normalize(expr: Expr) -> Expr:
+    """Tidy up the noise that unevaluated parsing leaves behind.
+
+    With evaluate=False, "1 / x" is kept as  "1 * (1/x)"  -- maths-wise it
+    is fine, but on screen it would read  "1 1/x".  We drop stray
+    multiplies-by-one everywhere, keeping everything else exactly as
+    written (so the steps can still be shown one at a time).
+    """
+    if not expr.args:
+        return expr
+
+    parts = [normalize(part) for part in expr.args]
+
+    if expr.is_Mul:
+        kept = [part for part in parts if part != 1]
+        if kept and len(kept) != len(parts):
+            if len(kept) == 1:
+                return kept[0]
+            return Mul(*kept, evaluate=False)
+
+    if parts == list(expr.args):
+        return expr
+    return expr.func(*parts, evaluate=False)
+
+
 def parse_expression(text: str) -> Expr:
     """Turn "2*x + 3*x + 5 - 1" into a SymPy expression, kept exactly as typed."""
     _check_input(text)
@@ -64,11 +89,12 @@ def parse_expression(text: str) -> Expr:
     if not text.strip():
         raise ValueError("Please type something first.")
 
-    return parse_expr(
+    parsed = parse_expr(
         text,
         transformations=_TRANSFORMATIONS,
         evaluate=False,  # do NOT solve it yet -- we want to show the steps
     )
+    return normalize(parsed)
 
 
 def parse_equation(text: str) -> tuple[Expr, Expr]:

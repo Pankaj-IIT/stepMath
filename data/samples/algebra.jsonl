@@ -1,0 +1,13 @@
+# A small starter batch: hand-written formulas and tricks.
+# Import with:   python scripts/import_formulas.py data/samples/algebra.jsonl
+{"kind":"identity","name":"Difference of Squares","left":"?a^2 - ?b^2","right":"(?a - ?b)*(?a + ?b)","origin":"hand"}
+{"kind":"identity","name":"Sum of Squares (backwards)","left":"(?a - ?b)*(?a + ?b)","right":"?a^2 - ?b^2","origin":"hand"}
+{"kind":"identity","name":"Pythagorean Identity","left":"sin(?a)^2 + cos(?a)^2","right":"1","origin":"hand"}
+{"kind":"identity","name":"Tangent as a Quotient","left":"tan(?a)","right":"sin(?a)/cos(?a)","origin":"hand"}
+{"kind":"identity","name":"Adding Fractions","left":"1/?a + 1/?b","right":"(?a + ?b)/(?a*?b)","origin":"hand"}
+{"kind":"identity","name":"Cube of a Sum","left":"(?a + ?b)^3","right":"?a^3 + 3*?a^2*?b + 3*?a*?b^2 + ?b^3","origin":"hand"}
+{"kind":"identity","name":"Double Angle for Sine","left":"sin(2*?a)","right":"2*sin(?a)*cos(?a)","origin":"hand"}
+{"kind":"method","name":"Expand then Collect","steps":[{"op":"expand"},{"op":"collect"}],"origin":"hand"}
+{"kind":"method","name":"Factorise Completely","steps":[{"op":"factor"}],"origin":"hand"}
+{"kind":"method","name":"Difference of Squares Method","steps":[{"left":"?a^2 - ?b^2","right":"(?a - ?b)*(?a + ?b)","name":"Use the difference of squares"},{"op":"factor"}],"origin":"hand"}
+{"kind":"method","name":"Tidy Trigonometry","steps":[{"op":"expand"},{"op":"trigsimp"}],"origin":"hand"}

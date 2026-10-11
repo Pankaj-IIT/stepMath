@@ -4,10 +4,12 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite",
+    "api": "python -m uvicorn api.main:app --reload --port 8000",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "api": "uvicorn api.main:app --reload"
+    "test": "pytest"
   },
   "dependencies": {
     "katex": "^0.16.11",
