@@ -18,7 +18,9 @@ then the bigger moves (expanding brackets).
 
 from typing import Callable, Optional, Tuple
 
-from sympy import Add, Mul, Pow, S, collect, expand, srepr
+from sympy import (Add, Mul, Pow, S, collect, csc, cos, cot, expand,
+                   expand_trig, factor, pi, sec, simplify, srepr, sin, tan,
+                   together)
 from sympy.core.expr import Expr
 
 # A rule takes an expression and either returns (new_expression, step_name)
@@ -26,7 +28,7 @@ from sympy.core.expr import Expr
 Rule = Callable[[Expr], Optional[Tuple[Expr, str]]]
 
 
-def _changed(before: Expr, after: Expr) -> bool:
+def changed(before: Expr, after: Expr) -> bool:
     """Did the maths really change? Compares the full structure, not just looks."""
     return srepr(before) != srepr(after)
 
@@ -94,6 +96,12 @@ def eval_numbers(expr: Expr):
     done = [_calculate(term) for term in numbers]
     total = Add(*done) if expr.is_Add else Mul(*done)
 
+    # A "number" that still has parts -- cos(1/2), sqrt(2) -- cannot be
+    # worked out any further, so combining it would only shuffle the
+    # display around. Leave it alone.
+    if not total.is_Number:
+        return None
+
     # Nothing useful to do: adding 0, or multiplying by 1, changes nothing
     # (and rebuilding would only shuffle the display around).
     if (expr.is_Add and total == 0) or (expr.is_Mul and total == 1):
@@ -107,7 +115,7 @@ def eval_numbers(expr: Expr):
     else:
         new = Mul(total, *others, evaluate=False)
 
-    if not _changed(expr, new):
+    if not changed(expr, new):
         return None
     return new, "Evaluate numbers"
 
@@ -130,7 +138,7 @@ def combine_like_terms(expr: Expr):
         return None  # only numbers here -- rule 2 deals with those
 
     new = collect(expr, variables)
-    if not _changed(expr, new):
+    if not changed(expr, new):
         return None
     return new, "Combine like terms"
 
@@ -153,7 +161,7 @@ def tidy_powers(expr: Expr):
 
     # Rebuilding WITH evaluation lets SymPy collect the repeats.
     new = Mul(*expr.args)
-    if not _changed(expr, new):
+    if not changed(expr, new):
         return None
     return new, "Tidy powers"
 
@@ -180,19 +188,105 @@ def expand_brackets(expr: Expr):
         return None
 
     new = expand(expr)
-    if not _changed(expr, new):
+    if not changed(expr, new):
         return None
     return new, "Expand brackets"
 
 
+def take_lcm(expr: Expr):
+    """Put fractions over one common denominator -- SymPy's together().
+
+        sin^2/cos^2 + 1  ->  (sin^2 + cos^2)/cos^2   "Take the LCM"
+        1/y + x/y        ->  (x + 1)/y
+
+    That common denominator is what lets the next formula fire, e.g. the
+    numerator above becomes  sin^2 + cos^2  =  1.
+
+    Like expanding and factoring this reshapes the maths, so steps.py only
+    allows it on parts that still contain what you typed.
+    """
+    # Only when there IS a division: together() also factors plain sums
+    # (it turns 2*x + 4 into 2*(x + 2)), which would steal the step name
+    # from take_common below.
+    if not _has_denominator(expr):
+        return None
+
+    new = together(expr)
+    if not changed(expr, new):
+        return None
+    return new, "Take the LCM"
+
+
+def take_common(expr: Expr):
+    """Take out a common factor -- SymPy's factor() does the work.
+
+        2*x + 4        ->  2*(x + 2)             "Take out the common factor"
+        -sin^2 - cos^2 ->  -(sin^2 + cos^2)      (which then lets the
+                                                  Pythagorean identity
+                                                  finish the job)
+
+    Like expanding, this is a "big move": it re-shapes the maths, so
+    steps.py only allows it on parts that still contain what you typed.
+    """
+    new = factor(expr)
+    if not changed(expr, new):
+        return None
+    return new, "Take out the common factor"
+
+
 # ---------------------------------------------------------------------------
 # The order rules are tried in: cheap clean-ups first, big moves last.
-# steps.py walks this list for every piece of the expression.
+#
+# The two groups are kept apart on purpose:
+#
+#   TIDY_RULES  are safe anywhere -- they only ever clean up (numbers,
+#               zeros, repeated factors, like terms).
+#   SHAPE_RULES change the shape of the maths (expanding), so steps.py only
+#               lets them work on the expression the user TYPED. Otherwise
+#               an expansion could keep re-expanding parts that an identity
+#               just created, and the steps would churn back and forth.
 # ---------------------------------------------------------------------------
-SIMPLIFY_RULES = [
+TIDY_RULES = [
     cancel_zero,
     eval_numbers,
     combine_like_terms,
     tidy_powers,
-    expand_brackets,
 ]
+
+def reduce_angle(expr: Expr):
+    """Move a constant (pi-based or negative) angle out: SymPy does it all.
+
+        sin(x + pi/2)  ->  cos(x)        "Reduce the angle"
+        sin(x + 2*pi)  ->  sin(x)
+        cos(x + pi)    ->  -cos(x)
+        sin(pi - x)    ->  sin(x)
+        sin(-x)        ->  -sin(x)
+
+    Replaces the whole allied-angle/period/negative-angle formula family:
+    there is no point storing rows for what SymPy already computes exactly.
+    Only constants IN THE ANGLE qualify, so two-angle sums (sin(x+y)) still
+    go through their own group.
+    """
+    if expr.func not in (sin, cos, tan, cot, sec, csc) or len(expr.args) != 1:
+        return None
+
+    angle = expr.args[0]
+    constant_shift = isinstance(angle, Add) and angle.has(pi)
+    negative_angle = angle.is_Mul and angle.could_extract_minus_sign()
+    if not (constant_shift or negative_angle):
+        return None  # not a constant shift (sin(x+y) has its own group)
+
+    new = simplify(expand_trig(expr))
+    if not changed(expr, new):
+        return None
+    return new, "Reduce the angle"
+
+
+SHAPE_RULES = [
+    reduce_angle,   # first: its condition is narrow and specific
+    expand_brackets,
+    take_lcm,      # before factoring, so a fraction step gets the right name
+    take_common,
+]
+
+SIMPLIFY_RULES = TIDY_RULES + SHAPE_RULES

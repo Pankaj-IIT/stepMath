@@ -11,7 +11,10 @@ transformation: expression in, expression out.
 
 from typing import Callable, Optional, Tuple
 
-from sympy import Expr, cancel, collect, expand, expand_trig, factor, powsimp, simplify, srepr, trigsimp
+from sympy import Expr, cancel, collect, expand, expand_trig, factor, powsimp, \
+    simplify, trigsimp
+
+from ..algebra.rules import changed  # the one shared "did it change?" check
 
 # name -> (label shown to the user, function)
 OPERATIONS: dict = {
@@ -49,6 +52,6 @@ def run_operation(name: str, expr: Expr) -> Optional[Tuple[Expr, str]]:
     label, function = OPERATIONS[name]
     new_expr = function(expr)
 
-    if srepr(new_expr) == srepr(expr):
+    if not changed(expr, new_expr):
         return None
     return new_expr, label

@@ -33,11 +33,12 @@ from sympy.parsing.sympy_parser import (
 # Everything else is refused before SymPy sees it.
 _ALLOWED_CHARACTERS = re.compile(r"^[a-zA-Z0-9_+\-*/^().=\s]+$")
 
-# How SymPy should read the text:
+# How SymPy should read the text (shared with knowledge/patterns.py, so
+# formulas and typed maths are read by exactly the same rules):
 #   standard_transformations     - the usual reading rules
 #   convert_xor                  - make "^" mean "to the power of" (not XOR)
 #   implicit_multiplication_application - allow "2x" as well as "2*x"
-_TRANSFORMATIONS = (
+TRANSFORMATIONS = (
     tuple(standard_transformations)
     + (convert_xor, implicit_multiplication_application)
 )
@@ -49,6 +50,122 @@ def _check_input(text: str) -> None:
         raise ValueError(
             "Only letters, numbers and maths symbols (+ - * / ^ ( )) are allowed."
         )
+
+
+# ---------------------------------------------------------------------------
+# People write functions WITHOUT brackets:  sinx, cos2x, sin x ...
+# Without help, "sinx" reads as TWO variables (sin times x), so no formula
+# in the database would ever match it. This step gives those calls brackets.
+# ---------------------------------------------------------------------------
+
+# Longest names first, so "cosec" is found before "cos".
+_BARE_FUNCTIONS = (
+    "arcsin", "arccos", "arctan", "cosec", "sinh", "cosh", "tanh",
+    "csc", "sec", "tan", "sin", "cos", "cot", "exp", "log", "ln", "sqrt",
+)
+
+# Spellings people use that SymPy names differently.
+_ALIASES = {"cosec": "csc"}
+
+
+def _function_at(text: str, index: int) -> "str | None":
+    """Is a known function name starting exactly at this position?"""
+    for name in _BARE_FUNCTIONS:
+        if text.startswith(name, index):
+            return name
+    return None
+
+
+def _may_start_here(text: str, index: int) -> bool:
+    """May a function name begin at this position?
+
+    Yes at the start, after an operator or bracket -- and after a digit
+    (so 2sinx is 2*sin(x)). NOT in the middle of another word, which keeps
+    a variable called "asinx" untouched.
+    """
+    if index == 0:
+        return True
+
+    previous = text[index - 1]
+    if previous.isdigit():
+        return True
+    if previous.isalnum() or previous == "_":
+        return False
+    return True
+
+
+def expand_bare_functions(text: str) -> str:
+    """Give bracket-less function calls their brackets.
+
+        -2sinx^2   ->  -2sin(x)^2        (your reported case)
+        cos2x      ->  cos(2x)
+        sin x + 1  ->  sin(x) + 1
+        sin(x)^2   ->  unchanged (already has brackets)
+
+    One caution: a variable whose name merely STARTS with a function name
+    ("sine") is read as sin(e) -- write sin(e) if that is what you mean.
+    """
+    out: list[str] = []
+    index = 0
+
+    while index < len(text):
+        function = None
+        # A function may also start right after a call we just rewrote:
+        # 2sinxcosx  ->  the "cos" follows the ")" of "sin(x)".
+        just_closed_call = bool(out) and out[-1].endswith(")")
+        if _may_start_here(text, index) or just_closed_call:
+            function = _function_at(text, index)
+
+        if function is None:
+            out.append(text[index])
+            index += 1
+            continue
+
+        after_name = index + len(function)
+
+        # Already a proper call: sin(...) -- leave it exactly as written.
+        if after_name < len(text) and text[after_name] == "(":
+            out.append(_ALIASES.get(function, function))
+            index = after_name
+            continue
+
+        # Find the argument: first the identifier run after the name,
+        # skipping at most the spaces people put there (sin x).
+        argument_start = after_name
+        while argument_start < len(text) and text[argument_start] == " ":
+            argument_start += 1
+
+        argument_end = argument_start
+        while argument_end < len(text) and (
+            text[argument_end].isalnum() or text[argument_end] == "_"
+        ):
+            argument_end += 1
+
+        # Never swallow a second function: in 2sinxcosx the argument of
+        # sin is just "x", and "cosx" is handled next.
+        argument_end = _next_function(text, argument_start, argument_end)
+
+        if argument_end == argument_start:
+            # No argument follows ("sin + 1"): keep the bare name.
+            out.append(_ALIASES.get(function, function))
+            index = after_name
+            continue
+
+        out.append(f"{_ALIASES.get(function, function)}"
+                   f"({text[argument_start:argument_end]})")
+        index = argument_end
+
+    return "".join(out)
+
+
+def _next_function(text: str, start: int, end: int) -> int:
+    """Position of a second function name inside [start, end), else `end`."""
+    position = start + 1
+    while position < end:
+        if _function_at(text, position) is not None:
+            return position
+        position += 1
+    return end
 
 
 def normalize(expr: Expr) -> Expr:
@@ -89,9 +206,12 @@ def parse_expression(text: str) -> Expr:
     if not text.strip():
         raise ValueError("Please type something first.")
 
+    # Give bracket-less calls their brackets:  sinx  ->  sin(x)
+    text = expand_bare_functions(text)
+
     parsed = parse_expr(
         text,
-        transformations=_TRANSFORMATIONS,
+        transformations=TRANSFORMATIONS,
         evaluate=False,  # do NOT solve it yet -- we want to show the steps
     )
     return normalize(parsed)

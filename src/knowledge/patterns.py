@@ -24,27 +24,25 @@ Two safety rules live here:
 import re
 from typing import Optional, Tuple
 
-from sympy import Add, Expr, Mul, Pow, Symbol, Wild
-from sympy.parsing.sympy_parser import (
-    convert_xor,
-    implicit_multiplication_application,
-    parse_expr,
-    standard_transformations,
-)
+from sympy import Add, Expr, Mul, Pow, S, Symbol, Wild
+from sympy.parsing.sympy_parser import parse_expr
 
-from ..algebra.parser import normalize
+from ..algebra.parser import TRANSFORMATIONS, normalize
 
-_TRANSFORMATIONS = (
-    tuple(standard_transformations)
-    + (convert_xor, implicit_multiplication_application)
-)
-
-# Our hole syntax:  ?a  ?rest  ?x1
-_HOLE = re.compile(r"\?([A-Za-z_]\w*)")
+# Our hole syntax:  ?a  ?rest  ?x1   and the number-only form  ?#a
+# (?#a may only be filled with a number -- that is what stops the
+#  "combine a sin + b cos" formula from swallowing products like
+#  sin(x)*cos(y), whose "coefficients" are not numbers.)
+_HOLE = re.compile(r"\?(#?)([A-Za-z_]\w*)")
 
 # Which characters a pattern may contain (a superset of normal maths,
-# plus "?" for holes). Anything else is refused.
-_PATTERN_CHARACTERS = re.compile(r"^[a-zA-Z0-9_+\-*/^().\s?]+$")
+# plus "?" and "#" for holes). Anything else is refused.
+_PATTERN_CHARACTERS = re.compile(r"^[a-zA-Z0-9_+\-*/^().\s?#]+$")
+
+
+def _needs_number(expr: Expr) -> bool:
+    """Wild-property: only numbers (2, sqrt(3), ...) may fill this hole."""
+    return bool(getattr(expr, "is_number", False))
 
 
 def _holes(*texts: str) -> dict:
@@ -53,16 +51,37 @@ def _holes(*texts: str) -> dict:
     The key must be the CLEANED name (_a) because that is what appears in
     the text we are about to parse; the Wild itself keeps the original
     name (a), which is the key we use in the bindings dictionary.
+    A hole written ?#a gets a number-only restriction.
     """
-    names = set()
+    found = {}
     for text in texts:
-        names.update(_HOLE.findall(text))
-    return {f"_{name}": Wild(name) for name in names}
+        for marker, name in _HOLE.findall(text):
+            found[f"_{name}"] = (marker == "#")
+
+    return {
+        key: (Wild(name[1:], properties=[_needs_number]) if number_only
+              else Wild(name[1:]))
+        for key, number_only in found.items()
+        for name in [key]
+    }
 
 
 def _clean(text: str) -> str:
-    """Turn our holes into names SymPy understands:  ?a  ->  _a"""
-    return _HOLE.sub(lambda m: "_" + m.group(1), text)
+    """Turn our holes into names SymPy understands:  ?a  ->  _a  (?#a too)"""
+    return _HOLE.sub(lambda match: "_" + match.group(2), text)
+
+
+def _pattern_expr(text: str, wilds: dict) -> Expr:
+    """Parse one piece of pattern text (the holes are in `wilds`).
+
+    The single place that knows HOW a pattern is read -- used by
+    parse_pattern, parse_pair and parse_solution, so the options live
+    in exactly one spot (the reading rules themselves are shared with
+    the main parser, see algebra/parser.TRANSFORMATIONS).
+    """
+    parsed = parse_expr(_clean(text), transformations=TRANSFORMATIONS,
+                        evaluate=False, local_dict=wilds)
+    return normalize(parsed)
 
 
 def parse_pattern(text: str) -> Expr:
@@ -70,14 +89,7 @@ def parse_pattern(text: str) -> Expr:
     if not _PATTERN_CHARACTERS.match(text or ""):
         raise ValueError(f"Not a valid pattern: {text!r}")
 
-    wilds = _holes(text)
-    parsed = parse_expr(
-        _clean(text),
-        transformations=_TRANSFORMATIONS,
-        evaluate=False,
-        local_dict=wilds,
-    )
-    return normalize(parsed)
+    return _pattern_expr(text, _holes(text))
 
 
 def parse_pair(left: str, right: str) -> Tuple[Expr, Expr]:
@@ -87,11 +99,7 @@ def parse_pair(left: str, right: str) -> Tuple[Expr, Expr]:
     must be the SAME hole, otherwise filling one does not fill the other.
     """
     wilds = _holes(left, right)
-    parsed_left = parse_expr(_clean(left), transformations=_TRANSFORMATIONS,
-                             evaluate=False, local_dict=wilds)
-    parsed_right = parse_expr(_clean(right), transformations=_TRANSFORMATIONS,
-                              evaluate=False, local_dict=wilds)
-    return normalize(parsed_left), normalize(parsed_right)
+    return _pattern_expr(left, wilds), _pattern_expr(right, wilds)
 
 
 def _evaluated(expr: Expr) -> Expr:
@@ -141,10 +149,13 @@ def _match(pattern: Expr, expr: Expr, bindings: dict) -> Optional[dict]:
                          arrangements until one fits
         everything else  matches part by part, in order
     """
-    # 1. A hole swallows anything in front of it.
+    # 1. A hole swallows anything in front of it -- unless the hole insists
+    #    on a number (?#a): then anything else is refused right here.
     #    Keyed by the hole object itself, because that is what SymPy's
     #    substitution understands (a plain "a" symbol would not match it).
     if isinstance(pattern, Wild):
+        if pattern.properties and not all(prop(expr) for prop in pattern.properties):
+            return None
         if pattern in bindings:
             return bindings if _same(bindings[pattern], expr) else None
         bindings[pattern] = expr
@@ -171,6 +182,15 @@ def _match(pattern: Expr, expr: Expr, bindings: dict) -> Optional[dict]:
                 and pattern.name == expr.name:
             return bindings
         return None
+
+    # 2b. A product pattern may match a BARE term, with an implicit
+    #     coefficient of 1:   ?a*sin(?t)   fits   sin(x)   (a = 1).
+    #     Without this,  sin(x) + cos(x)  could never use the
+    #     "combine a sin + b cos" formula, since there are no products
+    #     written out in the typed maths.
+    if isinstance(pattern, Mul) and not isinstance(expr, Mul):
+        return _match_in_any_order(pattern, Mul(S.One, expr, evaluate=False),
+                                   bindings)
 
     # 3. Different kind of node (sin vs cos, Add vs Mul, ...) -> no match.
     if pattern.func != expr.func:
@@ -221,6 +241,51 @@ def _match_in_any_order(pattern: Expr, expr: Expr, bindings: dict) -> Optional[d
     return None
 
 
+def parse_solution(left: str, right: str,
+                   solution: str) -> Tuple[Expr, Expr, Wild, Expr]:
+    """Read a "solution" row: the equation, and the answer it gives.
+
+        left      : "sin(?t)"          (one side of the equation)
+        right     : "0"                (the other side)
+        solution  : "?t = ?n*pi"       (the answer for the unknown)
+
+    Returns (left, right, unknown, value). The left of the "=" must be a
+    single hole -- that hole is the unknown being solved for.
+    """
+    if "=" not in solution:
+        raise ValueError(f'a solution must look like "?t = ...", got {solution!r}')
+
+    unknown_text, value_text = solution.split("=", 1)
+
+    wilds = _holes(left, right, unknown_text, value_text)
+    parsed_left = _pattern_expr(left, wilds)
+    parsed_right = _pattern_expr(right, wilds)
+    unknown = _pattern_expr(unknown_text.strip(), wilds)
+    value = _pattern_expr(value_text.strip(), wilds)
+
+    if not isinstance(unknown, Wild):
+        raise ValueError(
+            f'the left of a solution must be one hole like "?t", got {solution!r}'
+        )
+    return parsed_left, parsed_right, unknown, value
+
+
+def merge_bindings(*groups: "Optional[dict]") -> "Optional[dict]":
+    """Combine the hole fillings from matching both sides of an equation.
+
+    Returns None when a hole would have to hold two different things.
+    """
+    merged: dict = {}
+    for group in groups:
+        if group is None:
+            return None
+        for hole, value in group.items():
+            if hole in merged and not _same(merged[hole], value):
+                return None
+            merged[hole] = value
+    return merged
+
+
 def match_or_none(expr: Expr, pattern: Expr) -> "Optional[Tuple[dict, list]]":
     """Try to match this expression against a pattern.
 
@@ -243,8 +308,13 @@ def match_or_none(expr: Expr, pattern: Expr) -> "Optional[Tuple[dict, list]]":
         bindings = _match(candidate_pattern, candidate_expr, {})
 
         # Final soundness check: does the pattern really rebuild it?
-        if bindings is not None and _same(candidate_pattern.subs(bindings),
-                                          candidate_expr):
+        # Both sides are normalised first, because an implicit 1 (see the
+        # product rule in _match) is only visible in the evaluated form:
+        #   pattern.subs  ->  1*sin(x)   vs   sin(x)
+        if bindings is not None and _same(
+            _evaluated(candidate_pattern.subs(bindings)),
+            _evaluated(candidate_expr),
+        ):
             return bindings, []
 
     # A formula may also cover only PART of a sum or product.
@@ -266,14 +336,21 @@ def _match_part_of(expr: Expr, pattern: Expr) -> "Optional[Tuple[dict, list]]":
     for chosen in combinations(range(len(expr.args)), len(pattern.args)):
         piece = expr.func(*[expr.args[i] for i in chosen], evaluate=False)
 
-        bindings = _match(pattern, piece, {})
-        if bindings is None:
-            continue
-        if not _same(pattern.subs(bindings), piece):
-            continue
+        # Both the as-written and the evaluated form are tried, exactly like
+        # the whole-expression match: a subtraction nests its product
+        # (-1*(4*cos(x))) as written, but flattens when evaluated.
+        for candidate_piece, candidate_pattern in (
+            (piece, pattern),
+            (_evaluated(piece), _evaluated(pattern)),
+        ):
+            bindings = _match(candidate_pattern, candidate_piece, {})
+            if bindings is None:
+                continue
+            if not _same(candidate_pattern.subs(bindings), candidate_piece):
+                continue
 
-        leftover = [i for i in range(len(expr.args)) if i not in chosen]
-        return bindings, leftover
+            leftover = [i for i in range(len(expr.args)) if i not in chosen]
+            return bindings, leftover
 
     return None
 

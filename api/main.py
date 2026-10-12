@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from src.algebra.latex import to_latex
 from src.algebra.parser import parse_equation, parse_expression
 from src.algebra.solver import solve_equation
-from src.algebra.steps import simplify_steps
+from src.algebra.steps import alternative_ways, simplify_steps
 from src.knowledge import runner as method_runner
 from src.knowledge import store
 
@@ -46,17 +46,25 @@ class SolveRequest(BaseModel):
 class Step(BaseModel):
     name: str  # e.g. "Combine like terms"
     latex: str  # e.g. "5 x + 4"  (KaTeX draws this)
+    formula: str | None = None  # the formula used, e.g. "sin^2 + cos^2 = 1"
+
+
+class AlternativeWay(BaseModel):
+    """Another route to the same answer: its first move, and the full path."""
+    name: str  # the move that starts this route, e.g. "Sine of A + B"
+    steps: list[Step]
 
 
 class SolveResponse(BaseModel):
     steps: list[Step]
     final: str  # the latex of the last step
+    alternatives: list[AlternativeWay] = []  # other ways to the same answer
 
 
 class Entry(BaseModel):
     """One row of the formula database, as the UI needs to show it."""
     id: int
-    kind: str  # 'identity' | 'method'
+    kind: str  # 'identity' | 'method' | 'note' | 'solution'
     name: str
     statement: str  # LaTeX, may be empty for methods of plain operations
     steps: str | None = None  # methods only: their steps as JSON text
@@ -64,11 +72,17 @@ class Entry(BaseModel):
     origin: str  # 'ai' | 'hand'
     source: str | None = None
     usage_count: int
+    groups: list[str] = []  # formula families, e.g. ['two-angle-sum']
 
 
 class EntryList(BaseModel):
     entries: list[Entry]
     counts: dict  # totals, so the UI can show "12 need review"
+
+
+class GroupList(BaseModel):
+    """The formula families, for the filter chips in the Formulas tab."""
+    groups: list[dict]  # {name, description, count}
 
 
 class MethodRunRequest(BaseModel):
@@ -85,16 +99,24 @@ def health() -> dict:
 @app.post("/api/solve", response_model=SolveResponse)
 def solve(request: SolveRequest) -> "SolveResponse | JSONResponse":
     try:
+        ways: list = []
+
         if request.mode == "solve":
             left, right = parse_equation(request.expression)
             steps = solve_equation(left, right)
         elif request.mode == "simplify":
             expression = parse_expression(request.expression)
             steps = simplify_steps(expression)
+            # Other routes that finish at the same answer (simplify only).
+            ways = alternative_ways(expression)
         else:
             raise ValueError(f'Unknown mode "{request.mode}" (use simplify or solve).')
 
-        return SolveResponse(steps=steps, final=steps[-1]["latex"])
+        return SolveResponse(
+            steps=steps,
+            final=steps[-1]["latex"],
+            alternatives=[AlternativeWay(**way) for way in ways],
+        )
 
     except Exception as error:  # any problem becomes a friendly 400 message
         return _error(error)
@@ -108,7 +130,7 @@ def _error(error: Exception) -> JSONResponse:
     )
 
 
-def _entry_out(row) -> Entry:
+def _entry_out(row, tags: "list | None" = None) -> Entry:
     """Turn one database row into what the UI asked for."""
     return Entry(
         id=row["id"],
@@ -120,26 +142,35 @@ def _entry_out(row) -> Entry:
         origin=row["origin"],
         source=row["source"],
         usage_count=row["usage_count"],
+        groups=tags or [],
     )
 
 
 # ---------------------------------------------------------------------------
-# The formula database: browse, search, and review
+# The formula database: browse, search, families, and review
 # ---------------------------------------------------------------------------
 @app.get("/api/entries", response_model=EntryList)
 def list_entries(q: str = "", verified: int | None = None,
-                 limit: int = 50) -> EntryList:
-    """Search the database, or browse the newest rows when q is empty.
+                 limit: int = 500, group: str = "") -> EntryList:
+    """Search the database, or browse everything when q is empty.
 
     verified=1 shows only trusted formulas, verified=0 shows the review
-    queue, and leaving it out shows everything.
+    queue, and leaving it out shows everything. group="two-angle-sum"
+    limits the list to one formula family.
     """
     connection = store.get_connection()
-    rows = store.search(connection, q, verified, limit)
+    rows = store.search(connection, q, verified, limit, group or None)
+    tags = store.groups_for_rows(connection, rows)
     return EntryList(
-        entries=[_entry_out(row) for row in rows],
+        entries=[_entry_out(row, tags.get(row["id"])) for row in rows],
         counts=store.counts(connection),
     )
+
+
+@app.get("/api/groups", response_model=GroupList)
+def list_groups() -> GroupList:
+    """The formula families, each with a description and member count."""
+    return GroupList(groups=store.list_groups(store.get_connection()))
 
 
 @app.post("/api/entries/{entry_id}/approve")

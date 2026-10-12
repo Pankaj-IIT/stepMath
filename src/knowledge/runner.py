@@ -21,6 +21,7 @@ from typing import List, Tuple
 from sympy import Expr
 
 from ..algebra.latex import to_latex, to_latex_as_written
+from . import auxiliary
 from .ops import known_operation, run_operation
 from .patterns import apply_identity, parse_pair
 
@@ -61,6 +62,10 @@ def validate_steps(steps) -> None:
         if "op" in step:
             if not known_operation(step["op"]):
                 raise ValueError(f"step {index}: unknown operation {step['op']!r}")
+        elif "compute" in step:
+            if step["compute"] not in auxiliary.COMPUTES:
+                raise ValueError(
+                    f'step {index}: unknown compute step {step["compute"]!r}')
         elif "left" in step and "right" in step:
             try:
                 parse_pair(step["left"], step["right"])
@@ -72,8 +77,12 @@ def validate_steps(steps) -> None:
             )
 
 
-def run_method(expr: Expr, raw_steps: str) -> List[Step]:
+def run_method(expr: Expr, raw_steps: str,
+               with_final: bool = False):
     """Run every step of a method and return the lines to display.
+
+    with_final=True also returns the final expression, so callers can
+    prove the route ends at the same answer as the main route.
 
     Raises MethodError when a pattern step does not fit the expression.
     """
@@ -89,6 +98,8 @@ def run_method(expr: Expr, raw_steps: str) -> List[Step]:
         if len(output) >= MAX_STEPS:
             break
 
+        formula = None  # the formula shown next to this step, if it has one
+
         if "op" in step:
             try:
                 result = run_operation(step["op"], current)
@@ -96,6 +107,18 @@ def run_method(expr: Expr, raw_steps: str) -> List[Step]:
                 raise MethodError(number, str(error))
             if result is None:
                 continue  # operation had nothing to do -- quietly move on
+            new_expr, label = result
+            name = step.get("name", label)
+
+        elif "compute" in step:
+            # A named calculation (e.g. the auxiliary-angle steps): these
+            # compute real numbers, so they are code, not stored patterns.
+            try:
+                result = auxiliary.run_compute(step["compute"], current)
+            except Exception as error:
+                raise MethodError(number, str(error))
+            if result is None:
+                continue  # nothing to compute here
             new_expr, label = result
             name = step.get("name", label)
 
@@ -108,15 +131,21 @@ def run_method(expr: Expr, raw_steps: str) -> List[Step]:
                     step.get("name", f'pattern "{step["left"]}" did not match'),
                 )
             name = step.get("name", "Rewrite")
+            formula = f"{to_latex(left)} = {to_latex(right)}"
 
         latex = to_latex(new_expr)
         if latex in seen:
             continue  # nothing visible changed -- do not show it twice
 
         seen.add(latex)
-        output.append({"name": name, "latex": latex})
+        entry: Step = {"name": name, "latex": latex}
+        if formula:
+            entry["formula"] = formula
+        output.append(entry)
         current = new_expr
 
+    if with_final:
+        return output, current
     return output
 
 

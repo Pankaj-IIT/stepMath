@@ -1,0 +1,24 @@
+# General solutions of trigonometric equations (source: section 3 of the notes).
+# Import with:  python scripts/import_formulas.py data/samples/trigonometric_equations.jsonl
+#
+# A hole that appears ONLY in the answer (?n) is treated as an integer,
+# which is what "n in Z" means in these formulas.
+#
+# Left out: items (j)-(m) -- they state values like sin(n*pi) = 0 with n an
+# integer ON THE LEFT side of an identity, which needs the "condition"
+# feature we discussed rather than a plain left = right rewrite.
+{"kind":"solution","name":"sin theta = 0","left":"sin(?t)","right":"0","solution":"?t = ?n*pi"}
+{"kind":"solution","name":"cos theta = 0","left":"cos(?t)","right":"0","solution":"?t = (2*?n + 1)*pi/2"}
+{"kind":"solution","name":"tan theta = 0","left":"tan(?t)","right":"0","solution":"?t = ?n*pi"}
+{"kind":"solution","name":"sin theta = sin alpha","left":"sin(?t)","right":"sin(?a)","solution":"?t = ?n*pi + (-1)^?n * ?a"}
+{"kind":"solution","name":"cos theta = cos alpha (plus)","left":"cos(?t)","right":"cos(?a)","solution":"?t = 2*?n*pi + ?a"}
+{"kind":"solution","name":"cos theta = cos alpha (minus)","left":"cos(?t)","right":"cos(?a)","solution":"?t = 2*?n*pi - ?a"}
+{"kind":"solution","name":"tan theta = tan alpha","left":"tan(?t)","right":"tan(?a)","solution":"?t = ?n*pi + ?a"}
+{"kind":"solution","name":"sin theta = 1","left":"sin(?t)","right":"1","solution":"?t = (4*?n + 1)*pi/2"}
+{"kind":"solution","name":"cos theta = 1","left":"cos(?t)","right":"1","solution":"?t = 2*?n*pi"}
+{"kind":"solution","name":"sin^2 theta = sin^2 alpha (plus)","left":"sin(?t)^2","right":"sin(?a)^2","solution":"?t = ?n*pi + ?a"}
+{"kind":"solution","name":"sin^2 theta = sin^2 alpha (minus)","left":"sin(?t)^2","right":"sin(?a)^2","solution":"?t = ?n*pi - ?a"}
+{"kind":"solution","name":"cos^2 theta = cos^2 alpha (plus)","left":"cos(?t)^2","right":"cos(?a)^2","solution":"?t = ?n*pi + ?a"}
+{"kind":"solution","name":"cos^2 theta = cos^2 alpha (minus)","left":"cos(?t)^2","right":"cos(?a)^2","solution":"?t = ?n*pi - ?a"}
+{"kind":"solution","name":"tan^2 theta = tan^2 alpha (plus)","left":"tan(?t)^2","right":"tan(?a)^2","solution":"?t = ?n*pi + ?a"}
+{"kind":"solution","name":"tan^2 theta = tan^2 alpha (minus)","left":"tan(?t)^2","right":"tan(?a)^2","solution":"?t = ?n*pi - ?a"}

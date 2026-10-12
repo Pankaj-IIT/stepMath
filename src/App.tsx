@@ -7,16 +7,23 @@ import katex from 'katex';
 interface Step {
   name: string;
   latex: string;
+  formula?: string | null; // the formula that was applied, if it came from the database
 }
 
 interface SolveResponse {
   steps: Step[];
   final: string;
+  alternatives?: AlternativeWay[]; // other routes to the same answer
+}
+
+interface AlternativeWay {
+  name: string; // the first move of that route
+  steps: Step[];
 }
 
 interface Entry {
   id: number;
-  kind: 'identity' | 'method';
+  kind: string; // 'identity' | 'method' | 'note' | 'solution'
   name: string;
   statement: string; // LaTeX, may be empty
   steps: string | null; // methods only: their steps as JSON text
@@ -24,6 +31,7 @@ interface Entry {
   origin: string; // 'ai' | 'hand'
   source: string | null;
   usage_count: number;
+  groups?: string[]; // formula families, e.g. ['two-angle-sum']
 }
 
 interface EntryList {
@@ -77,6 +85,14 @@ function methodSummary(stepsJson: string | null): string {
 }
 
 // Style for the little round labels (the text goes in the element's children).
+// Colour of the little round label for each kind of entry.
+const KIND_COLOR: Record<string, string> = {
+  identity: '#38bdf8',
+  method: '#a78bfa',
+  note: '#94a3b8',
+  solution: '#f472b6',
+};
+
 const BADGE = (color: string): React.CSSProperties => ({
   fontSize: '0.7rem',
   padding: '2px 8px',
@@ -116,14 +132,17 @@ export default function App() {
   const [inputStr, setInputStr] = useState('2*x + 3*x + 5 - 1');
   const [mode, setMode] = useState<'simplify' | 'solve'>('simplify');
   const [steps, setSteps] = useState<Step[]>([]);
+  const [alternatives, setAlternatives] = useState<AlternativeWay[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [methodTitle, setMethodTitle] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [methods, setMethods] = useState<Entry[]>([]);
 
   // --- formulas page ------------------------------------------------------
   const [query, setQuery] = useState('');
   const [reviewOnly, setReviewOnly] = useState(false);
+  const [selectedFamily, setSelectedFamily] = useState(''); // '' = all
+  const [families, setFamilies] = useState<
+    { name: string; description: string; count: number }[]
+  >([]);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [counts, setCounts] = useState({ total: 0, verified: 0, needs_review: 0 });
   const [formulaError, setFormulaError] = useState<string | null>(null);
@@ -143,11 +162,12 @@ export default function App() {
           signal: controller.signal,
         });
         setSteps(data.steps);
+        setAlternatives(data.alternatives ?? []);
         setError(null);
-        setMethodTitle(null);
       } catch (err: any) {
         if (err?.name === 'AbortError') return; // user kept typing, ignore
         setSteps([]);
+        setAlternatives([]);
         setError(err?.message ?? 'Cannot reach the Python server. Start it with:  npm run api');
       }
     }, 300);
@@ -158,24 +178,6 @@ export default function App() {
     };
   }, [inputStr, mode, refreshKey]);
 
-  // Which complete methods could start on this expression?
-  useEffect(() => {
-    if (tab !== 'solve' || mode !== 'simplify') return;
-
-    const timer = setTimeout(async () => {
-      try {
-        const data = await api<EntryList>(
-          `/api/methods/applicable?expression=${encodeURIComponent(inputStr)}`
-        );
-        setMethods(data.entries);
-      } catch {
-        setMethods([]); // no database / bad expression: just show nothing
-      }
-    }, 300);
-
-    return () => clearTimeout(timer);
-  }, [inputStr, mode, tab]);
-
   // Load formulas whenever the search page needs them.
   useEffect(() => {
     if (tab !== 'formulas') return;
@@ -183,8 +185,9 @@ export default function App() {
     const timer = setTimeout(async () => {
       try {
         const verified = reviewOnly ? '&verified=0' : '';
+        const family = selectedFamily ? `&group=${encodeURIComponent(selectedFamily)}` : '';
         const data = await api<EntryList>(
-          `/api/entries?q=${encodeURIComponent(query)}${verified}&limit=50`
+          `/api/entries?q=${encodeURIComponent(query)}${verified}${family}&limit=500`
         );
         setEntries(data.entries);
         setCounts(data.counts);
@@ -195,25 +198,29 @@ export default function App() {
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [tab, query, reviewOnly, refreshKey]);
+  }, [tab, query, reviewOnly, selectedFamily, refreshKey]);
+
+  // The formula families (filter chips) for the search page.
+  useEffect(() => {
+    if (tab !== 'formulas') return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api<{ groups: { name: string; description: string; count: number }[] }>(
+          '/api/groups'
+        );
+        if (!cancelled) setFamilies(data.groups);
+      } catch {
+        if (!cancelled) setFamilies([]); // no database: no chips
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, refreshKey]);
 
   // --- actions ------------------------------------------------------------
-  const runMethod = async (entry: Entry) => {
-    try {
-      const data = await api<SolveResponse>('/api/methods/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expression: inputStr, id: entry.id }),
-      });
-      setSteps(data.steps);
-      setMethodTitle(entry.name);
-      setError(null);
-      setTab('solve');
-    } catch (err: any) {
-      setError(err?.message ?? 'The method could not run.');
-    }
-  };
-
   const review = async (entryId: number, approve: boolean) => {
     try {
       await api(`/api/entries/${entryId}/${approve ? 'approve' : 'reject'}`, {
@@ -245,6 +252,28 @@ export default function App() {
     >
       {label}
     </button>
+  );
+
+  // One step card. Used by the main route AND by every alternative route,
+  // so both look and behave the same.
+  const stepCard = (step: Step, index: number, key: string) => (
+    <div key={key} style={CARD(index === 0 ? '#38bdf8' : '#22c55e')}>
+      <div style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '4px' }}>
+        {index === 0 ? 'Initial Expression' : `Step ${index}: "${step.name}"`}
+      </div>
+      <MathBlock math={step.latex} />
+
+      {/* When a database formula was applied, show it too, so the student
+          can see WHICH rule of maths was used. */}
+      {step.formula && (
+        <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px dashed #334155' }}>
+          <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: '2px' }}>
+            Formula used:
+          </div>
+          <MathBlock math={step.formula} />
+        </div>
+      )}
+    </div>
   );
 
   return (
@@ -285,56 +314,34 @@ export default function App() {
             {error && <p style={{ color: '#ef4444', marginTop: '6px' }}>{error}</p>}
           </div>
 
-          {/* Methods that could start on this expression, ready to click. */}
-          {mode === 'simplify' && methods.length > 0 && (
-            <div style={{ marginBottom: '20px' }}>
-              <div style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '8px' }}>
-                Methods you can run on this expression:
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                {methods.map((entry) => (
-                  <button key={entry.id} onClick={() => runMethod(entry)} style={BUTTON('#facc15')}>
-                    {entry.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* When a method ran, say so and offer the automatic steps back. */}
-          {methodTitle && (
-            <div
-              style={{
-                ...CARD('#facc15'),
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '14px',
-              }}
-            >
-              <span style={{ color: '#fde68a', fontWeight: 600 }}>Method: {methodTitle}</span>
-              <button
-                onClick={() => {
-                  setMethodTitle(null);
-                  setRefreshKey((key) => key + 1);
-                }}
-                style={BUTTON('#334155', '#cbd5e1')}
-              >
-                Show automatic steps
-              </button>
-            </div>
-          )}
-
+          {/* Methods live in the flow now: the main route, or under
+              "Other ways" below -- there is no button bar. */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            {steps.map((step, index) => (
-              <div key={index} style={CARD(index === 0 ? '#38bdf8' : '#22c55e')}>
-                <div style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '4px' }}>
-                  {index === 0 ? 'Initial Expression' : `Step ${index}: "${step.name}"`}
-                </div>
-                <MathBlock math={step.latex} />
-              </div>
-            ))}
+            {steps.map((step, index) => stepCard(step, index, String(index)))}
           </div>
+
+          {/* Other routes that finish at exactly the same answer, so a
+              student can compare ways of doing the same question. */}
+          {alternatives.length > 0 && (
+            <div style={{ marginTop: '30px' }}>
+              <div style={{ color: '#94a3b8', marginBottom: '12px', fontWeight: 600 }}>
+                Other ways to reach the same answer:
+              </div>
+
+              {alternatives.map((way, wayIndex) => (
+                <div key={wayIndex} style={{ marginBottom: '22px' }}>
+                  <div style={{ color: '#facc15', fontWeight: 600, marginBottom: '8px' }}>
+                    Way {wayIndex + 2} — starts with "{way.name}"
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                    {way.steps.map((step, index) =>
+                      stepCard(step, index, `${wayIndex}-${index}`)
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </>
       ) : (
         <>
@@ -363,8 +370,43 @@ export default function App() {
             </button>
           </div>
 
+          {/* Formula families: click one to see only its members. */}
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '6px',
+              marginBottom: '12px',
+            }}
+          >
+            <button
+              onClick={() => setSelectedFamily('')}
+              title="Show every formula"
+              style={BUTTON(
+                selectedFamily === '' ? '#38bdf8' : '#334155',
+                selectedFamily === '' ? '#0f172a' : '#cbd5e1'
+              )}
+            >
+              All ({counts.total})
+            </button>
+            {families.map((family) => (
+              <button
+                key={family.name}
+                onClick={() => setSelectedFamily(family.name)}
+                title={family.description}
+                style={BUTTON(
+                  selectedFamily === family.name ? '#a78bfa' : '#334155',
+                  selectedFamily === family.name ? '#0f172a' : '#cbd5e1'
+                )}
+              >
+                {family.name} ({family.count})
+              </button>
+            ))}
+          </div>
+
           <div style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '14px' }}>
             {counts.total} formulas · {counts.needs_review} waiting for review
+            {selectedFamily ? ` · showing family "${selectedFamily}"` : ''}
           </div>
 
           {formulaError && <p style={{ color: '#ef4444' }}>{formulaError}</p>}
@@ -382,12 +424,23 @@ export default function App() {
                   }}
                 >
                   <strong style={{ color: '#f8fafc' }}>{entry.name}</strong>
-                  <span style={BADGE(entry.kind === 'method' ? '#a78bfa' : '#38bdf8')}>
+                  <span style={BADGE(KIND_COLOR[entry.kind] ?? '#38bdf8')}>
                     {entry.kind}
                   </span>
                   <span style={BADGE(entry.verified ? '#22c55e' : '#f97316')}>
                     {entry.verified ? 'verified' : 'to check'}
                   </span>
+                  {/* The formula families this row belongs to */}
+                  {(entry.groups ?? []).map((groupName) => (
+                    <span
+                      key={groupName}
+                      onClick={() => setSelectedFamily(groupName)}
+                      title="Click to see this whole family"
+                      style={{ ...BADGE('#64748b'), cursor: 'pointer' }}
+                    >
+                      {groupName}
+                    </span>
+                  ))}
                   <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
                     {entry.origin} · used {entry.usage_count}×
                     {entry.source ? ` · ${entry.source}` : ''}

@@ -9,13 +9,8 @@ and the final answer that come out.
 
 import pytest
 
+from conftest import steps_for
 from src.algebra.parser import parse_expression
-from src.algebra.steps import simplify_steps
-
-
-def steps_for(text: str) -> list[dict]:
-    """Helper: expression text -> the steps the app would show."""
-    return simplify_steps(parse_expression(text))
 
 
 def names_of(text: str) -> list[str]:
@@ -81,6 +76,32 @@ def test_expand_square_of_sum():
 # --- Parsing ---------------------------------------------------------------
 def test_shorthand_multiplication():
     assert final_of("2x + 3x") == "5 x"
+
+
+def test_bare_function_names_get_their_brackets():
+    """sinx must read as sin(x), not as two variables called sin and x."""
+    from sympy import srepr
+
+    from src.algebra.parser import parse_expression
+
+    pairs = [
+        ("-2sinx^2 - cos2x + 5", "-2*sin(x)^2 - cos(2*x) + 5"),
+        ("sin x + 1", "sin(x) + 1"),
+        ("2sinxcosx", "2*sin(x)*cos(x)"),
+        ("cosecx", "csc(x)"),          # our spelling, SymPy's name
+        ("asinx", "asinx"),            # a variable, not a function call
+        ("sin(x)^2", "sin(x)^2"),      # already correct: untouched
+    ]
+    for typed, expected in pairs:
+        assert srepr(parse_expression(typed)) == srepr(parse_expression(expected)), typed
+
+
+def test_bare_function_input_solves_the_same_as_bracketed(sample_formulas):
+    """The reported case: both spellings must reach the same answer."""
+    bare = steps_for("-2sinx^2 - cos2x + 5")
+    bracketed = steps_for("-2*sin(x)^2 - cos(2*x) + 5")
+
+    assert bare[-1]["latex"] == bracketed[-1]["latex"] == "4"
 
 
 def test_caret_means_power():

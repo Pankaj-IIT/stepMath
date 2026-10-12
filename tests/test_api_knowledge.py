@@ -7,6 +7,7 @@ Run with:   pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from conftest import seed_entry
 from src.knowledge import store
 
 client = TestClient(app)
@@ -16,38 +17,10 @@ def _seed(**overrides):
     """Put one entry into the (test) database and return its id.
 
     Content (left/right/steps) is unique per name, because duplicates are
-    skipped on purpose -- see store.insert_entry.
+    skipped on purpose -- see store.insert_entry. The building of the row
+    itself lives in conftest.make_entry, shared with the other test files.
     """
-    import re
-
-    name = overrides.get("name", "Seeded Thing")
-    slug = re.sub(r"[^a-z0-9]", "", name.lower()) or "entry"
-
-    entry = {
-        "kind": "identity",
-        "name": name,
-        "statement": "x = x",
-        "left": overrides.get("left", f"{slug} + 0"),
-        "right": overrides.get("right", slug),
-        "signature": "Add(_,_)",
-        "verified": 1,
-        "origin": "hand",
-        "source": "test",
-    }
-    entry.update(overrides)
-    entry["dedup_key"] = store.dedup_key(
-        entry["kind"], entry.get("left"), entry.get("right"), entry.get("steps")
-    )
-    connection = store.get_connection()
-    store.insert_entry(connection, entry)
-    connection.commit()
-
-    # Look it up by its exact name (search() is prefix-based and might
-    # match an older, similar name).
-    row = connection.execute(
-        "SELECT id FROM entries WHERE name = ?", (name,)
-    ).fetchone()
-    return row["id"]
+    return seed_entry(**{"statement": "x = x", **overrides})
 
 
 def test_entries_endpoint_returns_list_and_counts():
@@ -114,7 +87,9 @@ def test_running_a_method_returns_its_steps():
         name="Run Me",
         left=None,
         right=None,
-        steps='[{"op": "expand"}, {"op": "collect"}]',
+        # unique content: the step's own name makes it differ from the
+        # shipped "Expand then Collect" batch row (duplicates are skipped)
+        steps='[{"op": "expand"}, {"op": "collect", "name": "Gather terms"}]',
         signature="",
         applies_to="any",
         statement="",

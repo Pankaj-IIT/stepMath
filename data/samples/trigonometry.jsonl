@@ -1,0 +1,113 @@
+# Trigonometry formulas, converted from the LaTeX notes.
+# Import with:  python scripts/import_formulas.py data/samples/trigonometry.jsonl
+#
+# Notes on what was left OUT (they do not fit a plain "left = right" rewrite):
+#   * conditional identities (A+B+C=180)  -> need a "condition" field
+#   * formulas with (-1)^n or sin(n*pi)=0 -> need "n is an integer" assumption
+#   * series/summation formulas           -> need summation notation
+#   * max/min values, quadrant tables     -> reference facts, not rewrites
+#   * anything with +/- in front of a root -> two possible answers
+#
+# --- 2. BASIC IDENTITIES ---------------------------------------------------
+{"kind":"identity","name":"Secant minus Tangent","left":"sec(?a)^2 - tan(?a)^2","right":"1"}
+{"kind":"identity","name":"Cosecant minus Cotangent","left":"csc(?a)^2 - cot(?a)^2","right":"1"}
+# The standard finishes for fraction chains:
+#   1 + tan^2  ->  sec^2     and     (sin^2+cos^2)/cos^2 -> 1/cos^2 -> sec^2
+{"kind":"identity","name":"One plus Tan Squared","left":"1 + tan(?a)^2","right":"sec(?a)^2"}
+{"kind":"identity","name":"One over Cos Squared","left":"1/cos(?a)^2","right":"sec(?a)^2"}
+# The negated form shows up constantly once cos(2x) has been rewritten:
+#   -2cos^2 + cos(2x)  ->  -sin^2 - cos^2  ->  -1
+{"kind":"identity","name":"Negated Pythagorean Identity","left":"-sin(?a)^2 - cos(?a)^2","right":"-1"}
+# The "or ..." rearrangements are METHODS (you click them when you need them),
+# because firing them automatically would make expressions ping-pong.
+{"kind":"method","name":"Write sin^2 as 1 - cos^2","steps":[{"left":"sin(?a)^2","right":"1 - cos(?a)^2","name":"Use sin^2 + cos^2 = 1"}]}
+{"kind":"method","name":"Write cos^2 as 1 - sin^2","steps":[{"left":"cos(?a)^2","right":"1 - sin(?a)^2","name":"Use sin^2 + cos^2 = 1"}]}
+{"kind":"method","name":"Write sec^2 as 1 + tan^2","steps":[{"left":"sec(?a)^2","right":"1 + tan(?a)^2","name":"Use sec^2 - tan^2 = 1"}]}
+{"kind":"method","name":"Write csc^2 as 1 + cot^2","steps":[{"left":"csc(?a)^2","right":"1 + cot(?a)^2","name":"Use csc^2 - cot^2 = 1"}]}
+{"kind":"method","name":"Write tan^2 as sec^2 - 1","steps":[{"left":"tan(?a)^2","right":"sec(?a)^2 - 1","name":"Use sec^2 - tan^2 = 1"}]}
+{"kind":"method","name":"Write cot^2 as csc^2 - 1","steps":[{"left":"cot(?a)^2","right":"csc(?a)^2 - 1","name":"Use csc^2 - cot^2 = 1"}]}
+# --- 4. ALLIED ANGLES (degrees converted to radians) -----------------------
+# --- 5. ANGLE SUM AND DIFFERENCE -------------------------------------------
+{"kind":"identity","name":"Sine of A + B","left":"sin(?a + ?b)","right":"sin(?a)*cos(?b) + cos(?a)*sin(?b)"}
+{"kind":"identity","name":"Sine of A - B","left":"sin(?a - ?b)","right":"sin(?a)*cos(?b) - cos(?a)*sin(?b)"}
+{"kind":"identity","name":"Cosine of A + B","left":"cos(?a + ?b)","right":"cos(?a)*cos(?b) - sin(?a)*sin(?b)"}
+{"kind":"identity","name":"Cosine of A - B","left":"cos(?a - ?b)","right":"cos(?a)*cos(?b) + sin(?a)*sin(?b)"}
+{"kind":"identity","name":"Tangent of A + B","left":"tan(?a + ?b)","right":"(tan(?a) + tan(?b))/(1 - tan(?a)*tan(?b))"}
+{"kind":"identity","name":"Tangent of A - B","left":"tan(?a - ?b)","right":"(tan(?a) - tan(?b))/(1 + tan(?a)*tan(?b))"}
+{"kind":"identity","name":"Cotangent of A + B","left":"cot(?a + ?b)","right":"(cot(?a)*cot(?b) - 1)/(cot(?b) + cot(?a))"}
+{"kind":"identity","name":"Cotangent of A - B","left":"cot(?a - ?b)","right":"(cot(?a)*cot(?b) + 1)/(cot(?b) - cot(?a))"}
+# --- 5. PRODUCT TO SUM ------------------------------------------------------
+# Combining a*sin + b*cos into ONE sine (the auxiliary-angle / R-formula
+# trick). atan2 is used instead of tan^-1(b/a) because tan^-1 is only valid
+# for a > 0, while atan2 is correct for every sign. The ?# holes insist the
+# coefficients are NUMBERS, so this can never swallow a product like
+# sin(x)*cos(y) halfway through another route.
+{"kind":"identity","name":"Combine a sin + b cos","left":"?#a*sin(?t) + ?#b*cos(?t)","right":"sqrt(?#a^2 + ?#b^2)*sin(?t + atan2(?#b, ?#a))"}
+{"kind":"identity","name":"Combine a cos + b sin","left":"?#a*cos(?t) + ?#b*sin(?t)","right":"sqrt(?#a^2 + ?#b^2)*sin(?t + atan2(?#a, ?#b))"}
+# The SAME trick as a METHOD, so the working (every step, as in the notes)
+# is available as an ALTERNATIVE WAY beside the direct formula.
+# "panel": false keeps it out of the Methods buttons -- the "Other ways"
+# section already offers it whenever it applies.
+{"kind":"method","name":"Combine a sin + b cos (show the working)","panel":false,"for":"?#a*sin(?t) + ?#b*cos(?t)","steps":[{"compute":"auxiliary_divide","name":"Take out R = sqrt(a^2 + b^2)"},{"compute":"auxiliary_as_sin","name":"Write as R sin(theta + phi)"}],"origin":"hand"}
+{"kind":"identity","name":"Two Sin Cos Product","left":"2*sin(?a)*cos(?b)","right":"sin(?a + ?b) + sin(?a - ?b)"}
+# The REVERSE of the expansions: typed products fold back into one compact
+# sum. (After an expansion step they cannot fire -- the guard knows those
+# parts were made by a formula -- so there is no ping-pong.)
+{"kind":"identity","name":"Fold sin cos + cos sin","left":"sin(?a)*cos(?b) + cos(?a)*sin(?b)","right":"sin(?a + ?b)"}
+{"kind":"identity","name":"Fold sin cos - cos sin","left":"sin(?a)*cos(?b) - cos(?a)*sin(?b)","right":"sin(?a - ?b)"}
+{"kind":"identity","name":"Fold cos cos - sin sin","left":"cos(?a)*cos(?b) - sin(?a)*sin(?b)","right":"cos(?a + ?b)"}
+{"kind":"identity","name":"Fold cos cos + sin sin","left":"cos(?a)*cos(?b) + sin(?a)*sin(?b)","right":"cos(?a - ?b)"}
+{"kind":"identity","name":"Two Cos Sin Product","left":"2*cos(?a)*sin(?b)","right":"sin(?a + ?b) - sin(?a - ?b)"}
+{"kind":"identity","name":"Two Cos Cos Product","left":"2*cos(?a)*cos(?b)","right":"cos(?a + ?b) + cos(?a - ?b)"}
+{"kind":"identity","name":"Two Sin Sin Product","left":"2*sin(?a)*sin(?b)","right":"cos(?a - ?b) - cos(?a + ?b)"}
+# --- 5. SUM TO PRODUCT ------------------------------------------------------
+{"kind":"identity","name":"Sin plus Sin","left":"sin(?c) + sin(?d)","right":"2*sin((?c + ?d)/2)*cos((?c - ?d)/2)"}
+{"kind":"identity","name":"Sin minus Sin","left":"sin(?c) - sin(?d)","right":"2*cos((?c + ?d)/2)*sin((?c - ?d)/2)"}
+{"kind":"identity","name":"Cos plus Cos","left":"cos(?c) + cos(?d)","right":"2*cos((?c + ?d)/2)*cos((?c - ?d)/2)"}
+{"kind":"identity","name":"Cos minus Cos","left":"cos(?c) - cos(?d)","right":"2*sin((?c + ?d)/2)*sin((?d - ?c)/2)"}
+# --- 5. MULTIPLE ANGLES -----------------------------------------------------
+{"kind":"identity","name":"Double Angle for Sine","left":"sin(2*?a)","right":"2*sin(?a)*cos(?a)"}
+{"kind":"identity","name":"Double Angle for Cosine","left":"cos(2*?a)","right":"cos(?a)^2 - sin(?a)^2"}
+# The OTHER spellings of cos(2A). They are formulas too, so the solver can
+# take any of them as its first move -- which is what makes the "Other ways
+# to reach the same answer" section show the variants.
+{"kind":"identity","name":"Cos 2A as 2cos^2 - 1","left":"cos(2*?a)","right":"2*cos(?a)^2 - 1"}
+{"kind":"identity","name":"Cos 2A as 1 - 2sin^2","left":"cos(2*?a)","right":"1 - 2*sin(?a)^2"}
+{"kind":"identity","name":"Cos 2A in terms of tan","left":"cos(2*?a)","right":"(1 - tan(?a)^2)/(1 + tan(?a)^2)"}
+# The REVERSE direction of the double angle: lets a route that expanded
+# cos(2A) fold back into one compact cos(2A) term. The ?k version also
+# covers scaled pairs like  2sin^2 - 2cos^2.
+{"kind":"identity","name":"Sin Squares minus Cos Squares","left":"sin(?a)^2 - cos(?a)^2","right":"-cos(2*?a)"}
+{"kind":"identity","name":"Scaled Sin Squares minus Cos Squares","left":"?k*sin(?a)^2 - ?k*cos(?a)^2","right":"-?k*cos(2*?a)"}
+{"kind":"identity","name":"One plus Double Angle Cosine","left":"1 + cos(2*?a)","right":"2*cos(?a)^2"}
+{"kind":"identity","name":"One minus Double Angle Cosine","left":"1 - cos(2*?a)","right":"2*sin(?a)^2"}
+{"kind":"identity","name":"Double Angle for Tangent","left":"tan(2*?a)","right":"2*tan(?a)/(1 - tan(?a)^2)"}
+{"kind":"identity","name":"Triple Angle for Sine","left":"sin(3*?a)","right":"3*sin(?a) - 4*sin(?a)^3"}
+{"kind":"identity","name":"Triple Angle for Cosine","left":"cos(3*?a)","right":"4*cos(?a)^3 - 3*cos(?a)"}
+{"kind":"identity","name":"Triple Angle for Tangent","left":"tan(3*?a)","right":"(3*tan(?a) - tan(?a)^3)/(1 - 3*tan(?a)^2)"}
+{"kind":"method","name":"Sin 2A in terms of tan","steps":[{"left":"sin(2*?a)","right":"2*tan(?a)/(1 + tan(?a)^2)","name":"Write sin 2A with tan"}]}
+# --- 5. SQUARE DIFFERENCES AND TRIPLE ANGLES -------------------------------
+{"kind":"identity","name":"Sin Squares Difference","left":"sin(?a)^2 - sin(?b)^2","right":"sin(?a + ?b)*sin(?a - ?b)"}
+{"kind":"identity","name":"Cos Squares minus Sin Squares","left":"cos(?a)^2 - sin(?b)^2","right":"cos(?a + ?b)*cos(?a - ?b)"}
+{"kind":"identity","name":"Cos Squares Difference","left":"cos(?b)^2 - cos(?a)^2","right":"sin(?a + ?b)*sin(?a - ?b)"}
+{"kind":"identity","name":"Sine of Three Angles","left":"sin(?a + ?b + ?c)","right":"sin(?a)*cos(?b)*cos(?c) + sin(?b)*cos(?a)*cos(?c) + sin(?c)*cos(?a)*cos(?b) - sin(?a)*sin(?b)*sin(?c)"}
+{"kind":"identity","name":"Cosine of Three Angles","left":"cos(?a + ?b + ?c)","right":"cos(?a)*cos(?b)*cos(?c) - sin(?a)*sin(?b)*cos(?c) - sin(?a)*cos(?b)*sin(?c) - cos(?a)*sin(?b)*sin(?c)"}
+{"kind":"identity","name":"Tangent of Three Angles","left":"tan(?a + ?b + ?c)","right":"(tan(?a) + tan(?b) + tan(?c) - tan(?a)*tan(?b)*tan(?c))/(1 - tan(?a)*tan(?b) - tan(?b)*tan(?c) - tan(?c)*tan(?a))"}
+# --- 6. EXACT VALUES (degrees converted to radians) ------------------------
+{"kind":"identity","name":"sin 18 degrees","left":"sin(pi/10)","right":"(sqrt(5) - 1)/4"}
+{"kind":"identity","name":"cos 36 degrees","left":"cos(pi/5)","right":"(sqrt(5) + 1)/4"}
+{"kind":"identity","name":"sin 15 degrees","left":"sin(pi/12)","right":"(sqrt(3) - 1)/(2*sqrt(2))"}
+{"kind":"identity","name":"cos 15 degrees","left":"cos(pi/12)","right":"(sqrt(3) + 1)/(2*sqrt(2))"}
+{"kind":"identity","name":"tan 15 degrees","left":"tan(pi/12)","right":"2 - sqrt(3)"}
+{"kind":"identity","name":"tan 75 degrees","left":"tan(5*pi/12)","right":"2 + sqrt(3)"}
+{"kind":"identity","name":"tan 22.5 degrees","left":"tan(pi/8)","right":"sqrt(2) - 1"}
+{"kind":"identity","name":"tan 67.5 degrees","left":"tan(3*pi/8)","right":"sqrt(2) + 1"}
+# --- 8. IMPORTANT RESULTS ---------------------------------------------------
+{"kind":"identity","name":"Sine Triple Product","left":"sin(?a)*sin(pi/3 - ?a)*sin(pi/3 + ?a)","right":"sin(3*?a)/4"}
+{"kind":"identity","name":"Cosine Triple Product","left":"cos(?a)*cos(pi/3 - ?a)*cos(pi/3 + ?a)","right":"cos(3*?a)/4"}
+{"kind":"identity","name":"Tangent Triple Product","left":"tan(?a)*tan(pi/3 - ?a)*tan(pi/3 + ?a)","right":"tan(3*?a)"}
+{"kind":"identity","name":"Cotangent Triple Product","left":"cot(?a)*cot(pi/3 - ?a)*cot(pi/3 + ?a)","right":"cot(3*?a)"}
+{"kind":"identity","name":"Three Sine Squares at 60 Degrees","left":"sin(?a)^2 + sin(pi/3 + ?a)^2 + sin(pi/3 - ?a)^2","right":"3/2"}
+{"kind":"identity","name":"Three Cosine Squares at 60 Degrees","left":"cos(?a)^2 + cos(pi/3 + ?a)^2 + cos(pi/3 - ?a)^2","right":"3/2"}
+{"kind":"identity","name":"Cotangent minus Tangent","left":"cot(?a) - tan(?a)","right":"2*cot(2*?a)"}
+{"kind":"identity","name":"Cosine Chain n equals 3","left":"cos(?a)*cos(2*?a)*cos(4*?a)","right":"sin(8*?a)/(8*sin(?a))"}

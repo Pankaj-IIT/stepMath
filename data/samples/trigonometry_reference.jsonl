@@ -1,0 +1,23 @@
+# Reference material: periodicity identities, domain/range tables, polygon
+# facts and solution recipes (source: sections 10, 12, 4 and 5 of the notes).
+# Import with:  python scripts/import_formulas.py data/samples/trigonometry_reference.jsonl
+#
+# Left out: the general tips ("avoid squaring...", "check denominators...").
+# They are prose advice, not formulas, so there is nothing for a student's
+# expression box to display -- they would need a text-notes feature.
+# --- 10. PERIODICITY (identities the solver can apply) ---------------------
+# --- 10. DOMAIN, RANGE AND PERIOD TABLE (reference notes) ------------------
+{"kind":"note","name":"Domain, range and period of sin","statement":"\\text{domain } \\mathbb{R},\\ \\text{range } [-1,1],\\ \\text{period } 2\\pi"}
+{"kind":"note","name":"Domain, range and period of cos","statement":"\\text{domain } \\mathbb{R},\\ \\text{range } [-1,1],\\ \\text{period } 2\\pi"}
+{"kind":"note","name":"Domain, range and period of tan","statement":"\\text{domain } \\mathbb{R}-\\left\\{\\tfrac{(2n+1)\\pi}{2}\\right\\},\\ \\text{range } \\mathbb{R},\\ \\text{period } \\pi"}
+{"kind":"note","name":"Domain, range and period of cot","statement":"\\text{domain } \\mathbb{R}-\\{n\\pi\\},\\ \\text{range } \\mathbb{R},\\ \\text{period } \\pi"}
+{"kind":"note","name":"Domain, range and period of sec","statement":"\\text{domain } \\mathbb{R}-\\left\\{\\tfrac{(2n+1)\\pi}{2}\\right\\},\\ \\text{range } (-\\infty,-1]\\cup[1,\\infty),\\ \\text{period } 2\\pi"}
+{"kind":"note","name":"Domain, range and period of cosec","statement":"\\text{domain } \\mathbb{R}-\\{n\\pi\\},\\ \\text{range } (-\\infty,-1]\\cup[1,\\infty),\\ \\text{period } 2\\pi"}
+# --- 12. POLYGON FACTS (all three in ONE card) -----------------------------
+# Kept as a note, not a formula: 180 degrees and pi are only equal through a
+# degrees->radians conversion, which our expression language has no sign for.
+{"kind":"note","name":"n-sided polygon angles","statement":"\\begin{aligned}\\text{sum of interior angles }&=(n-2)\\times180^\\circ=(n-2)\\pi\\\\[3pt]\\text{one interior angle, regular }n\\text{-gon}&=\\tfrac{n-2}{n}\\times180^\\circ=\\tfrac{n-2}{n}\\pi\\\\[3pt]\\text{sum of exterior angles }&=360^\\circ=2\\pi\\end{aligned}"}
+# --- TRIG EQUATIONS 4 and 5: the recipes -----------------------------------
+{"kind":"note","name":"Auxiliary angle method for a sin + b cos = c","statement":"\\sin(\\theta+\\phi)=\\tfrac{c}{\\sqrt{a^2+b^2}},\\quad \\phi=\\tan^{-1}\\!\\left(\\tfrac{b}{a}\\right)"}
+{"kind":"note","name":"a sin + b cos = c only has a solution when","statement":"\\left|c\\right| \\le \\sqrt{a^2+b^2}"}
+{"kind":"note","name":"Homogeneous equation: divide every term by cos^n","statement":"a_0\\tan^n x + a_1\\tan^{n-1}x + \\dots + a_n = 0"}
