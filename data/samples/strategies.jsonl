@@ -1,2 +1,8 @@
 {"kind":"strategy","name":"Expand then reduce","form":"product_of_sums","phases":[{"do":"expand","scope":"whole","until":"stuck"},{"do":"simplify","scope":"term","until":"stuck"},{"do":"collect","scope":"whole","until":"stuck"},{"do":"simplify","scope":"combination","until":"stuck"},{"do":"trigsimp","scope":"combination","until":"stuck"},{"do":"walk","scope":"whole","until":"stuck"},{"do":"simplify","scope":"whole","until":"once"}]}
-{"kind":"strategy","name":"Combine then factor then reduce","form":"multi_term_sum","phases":[{"do":"simplify","scope":"combination","until":"stuck"},{"do":"factor","scope":"whole","until":"stuck"},{"do":"simplify","scope":"bracket","until":"stuck"},{"do":"simplify","scope":"whole","until":"once"}]}
+# Incremental factoring: peel ONE difference-of-squares level per step
+# (factor_once), then let the stored formulas fire between the levels
+# (apply_formula) -- "factor, apply a formula, factor again". There is no
+# blanket final factor: after the formulas it would re-factor a finished
+# R-form (5 sin + 5 -> 5 (sin + 1)), and before them SymPy would peel a
+# power of sines straight to its linear factors.
+{"kind":"strategy","name":"Combine then factor then reduce","form":"multi_term_sum","phases":[{"do":"simplify","scope":"combination","until":"stuck"},{"do":"factor_once","scope":"whole","until":"stuck"},{"do":"factor_once","scope":"term","until":"stuck"},{"do":"apply_formula","scope":"whole","until":"stuck"}]}

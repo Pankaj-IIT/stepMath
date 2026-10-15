@@ -87,6 +87,11 @@
 {"kind":"identity","name":"Triple Angle for Tangent","left":"tan(3*?a)","right":"(3*tan(?a) - tan(?a)^3)/(1 - 3*tan(?a)^2)"}
 {"kind":"method","name":"Sin 2A in terms of tan","steps":[{"left":"sin(2*?a)","right":"2*tan(?a)/(1 + tan(?a)^2)","name":"Write sin 2A with tan"}]}
 # --- 5. SQUARE DIFFERENCES AND TRIPLE ANGLES -------------------------------
+# The fourth-power expansion (sin^4 + cos^4 = (sin^2+cos^2)^2 - 2sin^2cos^2,
+# finished with the Pythagorean identity), so routes that factor
+# sin^8 - cos^8 level by level can reduce the (sin^4 + cos^4) factor
+# without a raw SymPy hop.
+{"kind":"identity","name":"Fourth Powers of Sine and Cosine","left":"sin(?a)^4 + cos(?a)^4","right":"1 - 2*sin(?a)^2*cos(?a)^2"}
 {"kind":"identity","name":"Sin Squares Difference","left":"sin(?a)^2 - sin(?b)^2","right":"sin(?a + ?b)*sin(?a - ?b)"}
 {"kind":"identity","name":"Cos Squares minus Sin Squares","left":"cos(?a)^2 - sin(?b)^2","right":"cos(?a + ?b)*cos(?a - ?b)"}
 {"kind":"identity","name":"Cos Squares Difference","left":"cos(?b)^2 - cos(?a)^2","right":"sin(?a + ?b)*sin(?a - ?b)"}

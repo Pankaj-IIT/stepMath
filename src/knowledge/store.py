@@ -306,6 +306,11 @@ def find_identities(connection: sqlite3.Connection, expr: Expr,
            pattern with a greedy %) can never hide the better formula:
            the caller tries every candidate until one actually applies.
 
+    Inside a tier the MORE SPECIFIC signature sorts first: literal
+    characters (sin(_), cos(_), ...) outrank holes (%). That is what lets
+    "sin^2 - cos^2 = -cos(2a)" beat the generic "?a^2 - ?b^2" on a trig
+    node instead of letting import order (id) pick.
+
     The stored signature is used as a SQL LIKE pattern: a formula's hole
     (stored as %) may then cover a whole subtree, e.g.  sin(%)  is found
     for  sin(x)  and for  sin(x + y)  alike.
@@ -325,7 +330,9 @@ def find_identities(connection: sqlite3.Connection, expr: Expr,
         SELECT * FROM entries
         WHERE kind = 'identity' AND verified = 1
           AND (? LIKE signature {lead_clause})
-        ORDER BY (? LIKE signature) DESC, usage_count DESC, id
+        ORDER BY (? LIKE signature) DESC,
+                 LENGTH(REPLACE(signature, '%', '')) DESC,
+                 usage_count DESC, id
         LIMIT ?
         """,
         (*params, shape, limit),

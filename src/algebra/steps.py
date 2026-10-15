@@ -157,6 +157,10 @@ def alternative_ways(expr: Expr, include_db: bool = True,
     for route in _strategy_routes(expr, goal, include_db, frozenset()):
         if route["steps"] == main_steps:
             continue                      # that one IS the main route
+        if len(route["steps"]) < 3:
+            continue  # one move is not a route: the teach loop below
+                      # lists single moves, so a 2-line strategy route
+                      # would only steal their slot
         if not _same_answer(route["final"], main_final):
             continue  # a route elsewhere is not a WAY to this answer
         ways.append({"name": route["name"], "steps": route["steps"],
@@ -627,6 +631,19 @@ def _iter_changes(expr: Expr, rules: list[Rule], include_db: bool,
         for change in _stored_hits(expr, state, direction):
             yield change
 
+    # 3b) One level of a difference of squares: a^(2k) - b^(2k) peels to
+    #     (a^k - b^k)(a^k + b^k) -- ONE level at a time, and only AFTER the
+    #     stored formulas of this node had their turn, so a formula
+    #     (sin^2 + cos^2 = 1, sin^4 + cos^4 = ...) can fire between the
+    #     factor levels. Full factor() stays available (shape rules below)
+    #     for everything this one-level peel does not cover.
+    if direction in ("forward", "both"):
+        hit = run_operation("factor_once", expr)
+        if hit is not None:
+            new_expr, name = hit
+            if name not in state.banned and to_latex(new_expr) != to_latex(expr):
+                yield new_expr, name, None, None
+
     # 4) one honest SymPy shot at this node (search route, trig only).
     #    Placed BEFORE deriving, because derive() pays a proof for every
     #    variant while simplify() is one call -- a quick win must not be
@@ -710,6 +727,107 @@ def _iter_changes(expr: Expr, rules: list[Rule], include_db: bool,
             if to_latex(rebuilt) == to_latex(expr):
                 continue
             yield rebuilt, name, formula, row_id
+
+
+def _expands_variable_angle(source: Expr) -> bool:
+    """Does this pattern side EXPAND a compact trig call of a variable angle?
+
+    The source of  sin(?a + ?b),  cos(2*?a), ...  is one trig function
+    applied to an angle that still carries a symbol -- applying it spells
+    the compact call OUT (an expansion). A deterministic route (the
+    apply_formula phase) must not expand what a previous formula step just
+    compressed (the R-form ping-pong the history gate alone stops only a
+    full cycle later). Expansions stay available to the search walk and to
+    suggestions; exact values keep a constant angle (sin(pi/10) = ...) and
+    are reductions, so they pass.
+    """
+    from ..knowledge.classify import _TRIG
+
+    return (source.func in _TRIG and len(source.args) == 1
+            and bool(source.args[0].free_symbols))
+
+
+def formula_applies_here(expr: Expr, include_db: bool = True) -> bool:
+    """Can any verified stored identity rewrite this node (either way)?
+
+    The factor_once op consults it: when a formula owns a node, the named
+    formula step is the better move than a bare factor peel -- and peeling
+    would run PAST a recognizable form (sin^2 - cos^2 is the double-angle
+    row's, the book never factors it to (sin - cos)(sin + cos)).
+    """
+    if not include_db:
+        return False
+    try:
+        candidates = _stored_candidates(expr)
+    except Exception:
+        return False
+
+    for row in candidates:
+        try:
+            left, right = knowledge_patterns.parse_pair(row["left"], row["right"])
+        except Exception:
+            continue
+        for source, target in ((left, right), (right, left)):
+            try:
+                new_expr = knowledge_patterns.apply_identity(expr, source, target)
+            except Exception:
+                continue
+            if new_expr is None or to_latex(new_expr) == to_latex(expr):
+                continue
+            if any(isinstance(hole, Wild) for hole in new_expr.free_symbols):
+                continue  # a hole stayed unfilled: not a real rewrite
+            return True
+    return False
+
+
+def first_formula_move(expr: Expr, state: _SolveState,
+                       include_db: bool):
+    """The first STORED-identity rewrite available in this node's subtree,
+    as (new_expr, name, formula, row_id) -- or None when no stored formula
+    applies.
+
+    This is the op-phase twin of the walk's formula step: the same
+    candidate generator (formulas forward, then backwards, recursing into
+    children) with everything that is not a stored formula skipped --
+    rules, factor peels, SymPy moves and derived rearrangements all carry
+    a None/derived formula and are filtered by `formula is not None`
+    (derived ones never come up at all: with_derived=False). A strategy
+    phase of  {"do": "apply_formula"}  uses it, so a route can apply one
+    formula at a time -- deterministically, with the formula's name and
+    statement shown -- instead of letting a free walk wander.
+
+    Formula directions that EXPAND a compact trig call of a variable
+    angle are skipped (see _expands_variable_angle): a route must not
+    spell out what its own previous step just compressed.
+    """
+    if not include_db:
+        return None
+
+    blocked: set = set()
+    try:
+        candidates = _stored_candidates(expr)
+    except Exception:
+        candidates = []
+    for row in candidates:
+        try:
+            left, right = knowledge_patterns.parse_pair(row["left"], row["right"])
+        except Exception:
+            continue
+        for backwards in (False, True):
+            source = right if backwards else left
+            if _expands_variable_angle(source):
+                blocked.add(f"{row['name']} (backwards)" if backwards
+                            else row["name"])
+
+    for new_expr, name, formula, row in _iter_changes(
+            expr, SIMPLIFY_RULES, include_db, state,
+            with_derived=False, direction="both"):
+        if formula is None:
+            continue  # a rule/factor move, not a stored formula
+        if name in blocked:
+            continue  # an expansion of a compact call: the walk's job
+        return new_expr, name, formula, row
+    return None
 
 
 def _stored_candidates(expr: Expr) -> list:

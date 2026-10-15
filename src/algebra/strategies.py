@@ -38,7 +38,7 @@ from .latex import to_latex, to_latex_as_written
 from .parser import normalize
 from .rules import SIMPLIFY_RULES
 from .steps import (_SYMPY_MOVES, _SolveState, _bump, _initial_step,
-                    _iter_changes, _method_leaps)
+                    _iter_changes, _method_leaps, first_formula_move)
 
 # One strategy run's move limit -- moves one run may spend (a limit,
 # never a preference). A form that MATCHES but cannot reach the goal must
@@ -142,9 +142,22 @@ _COLLECT_FALLBACK = {"Evaluate numbers", "Combine like terms"}
 
 def _rebuild(root: Expr, index: int, new_child: Expr) -> Expr:
     """Put one changed child back into its parent, unevaluated then
-    normalised, so the display stays in reading order."""
+    normalised, so the display stays in reading order.
+
+    A product/sum root is also FLATTENED: a child that is itself a
+    product/sum is opened up, so its factors/terms stay visible as
+    children of the root for the next phase (an unflattened
+    Mul((a, b), c) would hide a and b from scope-"term" phases)."""
     args = list(root.args)
     args[index] = new_child
+
+    if root.is_Mul:
+        flat = [p for a in args for p in (a.args if a.is_Mul else [a])]
+        args = flat
+    elif root.is_Add:
+        flat = [p for a in args for p in (a.args if a.is_Add else [a])]
+        args = flat
+
     return normalize(root.func(*args, evaluate=False))
 
 
@@ -238,9 +251,14 @@ def _combination_move(root, do, state, attempt_cap=COMBINATION_ATTEMPTS):
     return None
 
 
-def _phase_move(root, do, scope, state):
+def _phase_move(root, do, scope, state, include_db=True):
     """One op move at this node -> (new_root, entries, rows) | None.
 
+    do "apply_formula": one stored-identity rewrite somewhere in this
+                        node's subtree (first applicable, forwards then
+                        backwards), shown with the formula's OWN name and
+                        statement -- the deterministic, no-wandering twin
+                        of the walk's formula step (see steps.first_formula_move).
     scope "whole"      : the op runs on the whole expression.
     scope "term"       : the op runs on each child left to right; the
                          first child that changes the root AND passes the
@@ -262,9 +280,21 @@ def _phase_move(root, do, scope, state):
                          other factor gets one plain operation -- when it
                          actually changes that factor. The phase's
                          `until:stuck` loop does the rest.
-    entries = the display lines this move produced (a leap shows its
+        entries = the display lines this move produced (a leap shows its
     sub-steps, never one opaque line); rows = usage ids to bump.
     """
+    if do == "apply_formula":
+        move = first_formula_move(root, state, include_db)
+        if move is None:
+            return None
+        new_expr, name, formula, row = move
+        if to_latex(new_expr) == to_latex(root) or state.revisits(new_expr):
+            return None
+        entry = {"name": name, "latex": to_latex(new_expr)}
+        if formula:
+            entry["formula"] = formula
+        return new_expr, [entry], [row] if row else []
+
     if scope == "bracket":
         if not root.is_Mul:
             return None              # nothing factored -> phase stuck
@@ -393,7 +423,7 @@ def _run_phases(doc, expr, target, banned, include_db):
             if do == "walk":
                 move = _walk_phase(current, state, include_db)
             else:
-                move = _phase_move(current, do, scope, state)
+                move = _phase_move(current, do, scope, state, include_db)
             if move is None:
                 break                    # fixed point: this phase is done
 

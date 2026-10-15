@@ -1374,9 +1374,12 @@ def test_sum_strategy_combination_steps_for_plain_arithmetic(sample_formulas):
 
 
 def test_new_strategy_finds_the_power_difference(sample_formulas):
-    """The multi_term_sum strategy must get to work on sin^8 - cos^8."""
+    """The multi_term_sum strategy must get to work on sin^8 - cos^8.
+
+    The first move is ONE level of the difference of squares (the
+    incremental peel), not a full one-shot factorization."""
     steps = steps_for("sin(x)^8 - cos(x)^8")
-    assert steps[1]["name"] == "Factorise"
+    assert steps[1]["name"] == "Factor as difference of squares"
 
 
 def test_bracket_scope_combines_inside_a_factor():
