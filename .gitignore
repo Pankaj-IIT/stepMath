@@ -10,3 +10,6 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 *.rejected.jsonl
+
+# The .bak-* files are the only safety net if a migration goes wrong - never commit them
+data/*.db.bak-*

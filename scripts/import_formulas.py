@@ -3,13 +3,16 @@ Import formulas from a JSONL file into data/knowledge.db.
 
     python scripts/import_formulas.py data/samples/algebra.jsonl
 
-One JSON object per line. Four kinds are accepted:
+One JSON object per line. Five kinds are accepted:
 
   {"kind":"identity","name":"Sum of Squares",
    "left":"?a^2 - ?b^2","right":"(?a - ?b)*(?a + ?b)"}
 
   {"kind":"method","name":"Factorise completely",
    "steps":[{"op":"factor"}]}
+
+  {"kind":"strategy","name":"Expand then reduce","form":"product_of_sums",
+   "phases":[{"do":"expand","scope":"whole","until":"stuck"}, ...]}
 
   {"kind":"note","name":"Period of tan",
    "statement":"\\text{period } \\pi"}          (reference only, never rewrites)
@@ -32,6 +35,11 @@ What happens to each line:
          equation                       -> rejected.jsonl (with a counter-example)
     solution SymPy proves               -> verified = 1
     solution SymPy cannot decide        -> verified = 0  (review queue)
+    strategy with an unknown form or a
+    phase the interpreter cannot run   -> rejected.jsonl (with the reason)
+    strategy whose form and phases are
+    all in the interpreter's vocabulary-> verified = 1  (no proof: no
+                                              left/right to prove)
     exact duplicate of something we have-> skipped
 
 Running the same file twice is harmless -- duplicates are detected by
@@ -50,11 +58,11 @@ from sympy import Expr  # noqa: E402
 
 from src.algebra.latex import to_latex  # noqa: E402
 from src.knowledge import gate, runner, store  # noqa: E402
-from src.knowledge.classify import classify  # noqa: E402
+from src.knowledge.classify import classify, mentioned_functions  # noqa: E402
 from src.knowledge.patterns import parse_pair, parse_solution  # noqa: E402
 from src.knowledge.signature import signature_of  # noqa: E402
 
-KINDS = ("identity", "method", "note", "solution")
+KINDS = ("identity", "method", "strategy", "note", "solution")
 
 
 def _lead_of(left: Expr) -> str:
@@ -148,6 +156,11 @@ def _prepare(line: dict, source: str) -> dict:
             # the SAME classifier the solver uses on nodes, so membership
             # and lookup can never drift apart.
             groups=sorted(classify(left)),
+            # BOTH sides: a row must be findable from whichever side
+            # resembles the expression (that is what lets a backwards
+            # direction be offered at all).
+            functions=sorted(mentioned_functions(left)
+                             | mentioned_functions(right)),
             verified=1 if verdict == "pass" else 0,
         )
         return entry
@@ -196,6 +209,31 @@ def _prepare(line: dict, source: str) -> dict:
             ),
             signature=signature_of(left),
             verified=1 if verdict == "pass" else 0,
+        )
+        return entry
+
+    # --- a strategy -------------------------------------------------------
+    # An authored route: a FORM (which expressions it applies to) plus the
+    # PHASES the interpreter runs for it. There is no left/right to prove,
+    # so the row is trusted straight away -- but the form and every phase
+    # must be something strategies.py actually knows how to run, or the
+    # route would fail silently at solve time.
+    if kind == "strategy":
+        from src.algebra import strategies as strategy_module  # lazy: cycle
+
+        form = (line.get("form") or "").strip()
+        phases = line.get("phases")
+        # One shared validator: the Strategies tab runs every row through
+        # the SAME checks, so the importer and the UI can never disagree.
+        strategy_module.validate_strategy(form, phases)
+
+        entry.update(
+            # The phases go in exactly as authored, so the interpreter
+            # can run them unchanged (the form travels as its own field --
+            # strategies have their own table, with no formula columns).
+            steps=json.dumps(phases, ensure_ascii=False),
+            form=form,
+            verified=1,
         )
         return entry
 
@@ -288,28 +326,54 @@ def import_file(path: Path) -> dict:
                     raise ValueError("each line must be a JSON object")
                 entry = _prepare(line, source)
 
-                # What makes a row unique:
+                # Strategies have their own table and their own fingerprint
+                # (form::phases, computed by store.insert_strategy), so
+                # only the entries kinds are fingerprinted here:
                 #   identity  -> its two sides
                 #   method    -> its list of steps
                 #   solution  -> its answer text (both +/- branches count)
                 #   note      -> its name AND its statement (two notes may
                 #                legitimately show the same maths)
-                if entry["kind"] == "identity":
-                    content = ""
-                elif entry["kind"] == "method":
-                    content = entry.get("steps")
-                elif entry["kind"] == "solution":
-                    content = entry.get("solution")
-                else:
-                    content = f'{entry["name"]} :: {entry.get("statement")}'
+                if entry["kind"] != "strategy":
+                    if entry["kind"] == "identity":
+                        content = ""
+                    elif entry["kind"] == "method":
+                        content = entry.get("steps")
+                    elif entry["kind"] == "solution":
+                        content = entry.get("solution")
+                    else:
+                        content = f'{entry["name"]} :: {entry.get("statement")}'
 
-                entry["dedup_key"] = store.dedup_key(
-                    entry["kind"], entry.get("left"), entry.get("right"), content
-                )
+                    entry["dedup_key"] = store.dedup_key(
+                        entry["kind"], entry.get("left"), entry.get("right"),
+                        content,
+                    )
             except Exception as error:
                 summary["rejected"] += 1
                 rejected.append(json.dumps(
                     {"reason": str(error), "line": text}, ensure_ascii=False))
+                continue
+
+            if entry["kind"] == "strategy":
+                # Into the strategies table. A row with the SAME form and
+                # phases is a duplicate (counted as one, not re-imported);
+                # insert_strategy reports it as the same friendly ValueError
+                # the API's POST answers with.
+                try:
+                    store.insert_strategy(
+                        connection, entry["name"], entry["form"],
+                        entry["steps"],
+                        origin=entry.get("origin", "hand"),
+                        source=entry.get("source"),
+                    )
+                except ValueError:
+                    summary["duplicates"] += 1
+                else:
+                    summary["imported"] += 1
+                    if entry["verified"]:
+                        summary["verified"] += 1
+                    else:
+                        summary["needs_review"] += 1
                 continue
 
             if store.insert_entry(connection, entry):

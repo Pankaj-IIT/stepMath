@@ -124,6 +124,19 @@ def test_first_line_matches_what_you_typed():
     assert steps[0]["latex"] == "2 x + 3 x + 5 - 1"
 
 
+def test_strategy_cache_keeps_each_spellings_own_route(sample_formulas):
+    """BUG 2: srepr canonicalises Add argument order, so
+    srepr("2*x+3*x-1+5") == srepr("2*x+3*x+5-1") -- a cache keyed only on
+    srepr serves one spelling the other's cached route (and its wrong
+    first line). The key must also carry the as-written latex, so each
+    spelling gets its own route in the same process."""
+    first = steps_for("2*x + 3*x - 1 + 5")
+    second = steps_for("2*x + 3*x + 5 - 1")
+
+    assert first[0]["latex"] == "2 x + 3 x - 1 + 5"
+    assert second[0]["latex"] == "2 x + 3 x + 5 - 1"
+
+
 def test_full_step_list_for_a_typical_question():
     steps = steps_for("2*x + 3*x + 5 - 1")
     assert [step["name"] for step in steps] == [

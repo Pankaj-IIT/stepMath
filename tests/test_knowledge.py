@@ -406,7 +406,11 @@ def test_double_angle_chain_reaches_minus_one(sample_formulas):
 
 
 def test_square_of_sum_reaches_one_plus_sin_2x(sample_formulas):
-    steps = steps_for("(sin(x) + cos(x))^2")
+    # simplify() answers 2*sin(x + pi/4)^2 here; this test means the
+    # textbook result, so it states its own target (the user's rule:
+    # "I will provide the target if not simplify").
+    expr = parse_expression("(sin(x) + cos(x))^2")
+    steps = simplify_steps(expr, target=parse_expression("sin(2*x) + 1"))
     assert steps[-1]["latex"] == "\\sin{\\left(2 x \\right)} + 1"
 
 
@@ -425,7 +429,11 @@ def test_takes_the_lcm_and_finishes_the_chain(sample_formulas):
           -> 1/cos^2                   Pythagorean Identity
           -> sec^2                     One over Cos Squared
     """
-    steps = steps_for("1 + sin(x)^2/cos(x)^2")
+    # SymPy's simplify() would answer 1/cos^2; this test means the
+    # textbook form, so it states its own target (the user's rule:
+    # "I will provide the target if not simplify").
+    expr = parse_expression("1 + sin(x)^2/cos(x)^2")
+    steps = simplify_steps(expr, target=parse_expression("sec(x)^2"))
     names = [step["name"] for step in steps]
 
     assert "Take the LCM" in names
@@ -434,9 +442,57 @@ def test_takes_the_lcm_and_finishes_the_chain(sample_formulas):
 
 
 def test_one_plus_tan_squared_reaches_secant_squared(sample_formulas):
-    steps = steps_for("1 + tanx^2")
+    # simplify() answers 1/cos^2 here; this test means sec^2 (the user's
+    # rule: "I will provide the target if not simplify").
+    expr = parse_expression("1 + tanx^2")
+    steps = simplify_steps(expr, target=parse_expression("sec(x)^2"))
     assert steps[-1]["name"] == "One plus Tan Squared"
     assert steps[-1]["latex"] == "\\sec^{2}{\\left(x \\right)}"
+
+
+# --- target-directed search and the gaps list -------------------------------
+def test_gap_is_recorded_when_no_strategy_reaches_the_target(sample_formulas):
+    """SymPy suggests the expanded numerator; our strategies walk around
+    it (factored form) without landing on it, so this joins the list of
+    simplifications we cannot explain yet -- the strategies to plug next."""
+    known = {row["target"] for row in store.list_gaps()}
+    steps = steps_for("(x^2 - 1)*(x^2 - 4)/(x^2 - 2*x + 1)")
+    fresh = [row for row in store.list_gaps() if row["target"] not in known]
+
+    assert fresh, "expected the unreachable target to be recorded as a gap"
+    gap = fresh[0]
+    assert "x^{2} - 1" in gap["example"]    # the input that missed it
+    assert "Take the LCM" in gap["tried"]    # what we did try
+    # the user still gets an explained (teaching) route meanwhile
+    assert steps[-1]["name"] != "Simplify with SymPy"
+
+
+def test_gap_hits_accumulate_on_the_same_target():
+    store.record_gap("1", "sin(x)^2 + cos(x)^2", "Pythagorean Identity")
+    store.record_gap("1", "sin(t)^2 + cos(t)^2", "Pythagorean Identity")
+
+    row = next(r for r in store.list_gaps() if r["target"] == "1")
+    assert row["hits"] == 2
+    assert "Pythagorean Identity" in row["tried"]
+
+
+def test_sub_pipeline_is_offered_as_a_named_step():
+    """The trig sub-pipeline (trigsimp) must appear among the candidates,
+    named like any other strategy -- not as the blunt SymPy jump."""
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _SolveState, _iter_changes
+
+    expr = parse_expression("sin(x) * sec(x)")
+    state = _SolveState(expr, frozenset())
+    results = {
+        name: new
+        for new, name, _formula, _row in _iter_changes(
+            expr, SIMPLIFY_RULES, True, state, with_derived=True
+        )
+    }
+
+    assert "Simplify trigonometry" in results
+    assert results["Simplify trigonometry"] == parse_expression("tan(x)")
 
 
 # --- combining a*sin + b*cos (the auxiliary-angle trick) --------------------
@@ -609,19 +665,54 @@ def test_group_route_finds_members(sample_formulas):
     assert store.find_by_groups(connection, []) == []
 
 
+# --- the progress guard: no action may lead to an earlier step --------------
+def test_no_route_returns_to_an_earlier_step():
+    """The user's rule: a step must never lead back to a state the route
+    has already shown (checked in canonical spelling, so a fold-back that
+    only re-orders the terms is caught too)."""
+    from src.algebra.latex import to_latex
+
+    for text in (
+        "sin(x)^8 - cos(x)^8",
+        "sin(x+y) + sin(x-y)",
+        "(sec(x) - tan(x))*(sec(x) + tan(x))",
+        "2*x + 4",
+        "(sin(x) + cos(x))^2",
+    ):
+        steps = steps_for(text)
+
+        # canonical latex of the START plus every displayed step
+        shown = [to_latex(parse_expression(text))]
+        shown += [step["latex"] for step in steps[1:]]
+
+        assert len(shown) == len(set(shown)), (
+            f"{text} revisited an earlier step: {shown}"
+        )
+
+
 # --- other ways to the same answer -----------------------------------------
 def test_cos_double_angle_variants_are_all_offered(sample_formulas):
     """Every spelling of cos(2A) should show up as its own way.
 
-    The variants live in the database as formulas, so banning the chosen
-    first move makes the next spelling surface as an alternative route
-    (each route is only kept if it reaches the same answer).
+    Which form the MAIN route ends in is decided by move order alone
+    (the greedy walk takes whichever named move comes first -- no cost
+    function steers it), so this test checks EQUIVALENCE, not one fixed
+    spelling -- and the variants must still be offered.
     """
-    from src.algebra.steps import alternative_ways
+    from sympy import simplify
+
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _build_steps, alternative_ways
 
     expression = "2*sin(x)^2 - cos(2*x)"
-    main_final = steps_for(expression)[-1]["latex"]
-    assert main_final == "3 \\sin^{2}{\\left(x \\right)} - \\cos^{2}{\\left(x \\right)}"
+    _, main_final = _build_steps(parse_expression(expression),
+                                 SIMPLIFY_RULES, True)
+
+    known_forms = [
+        parse_expression("3*sin(x)^2 - cos(2*x)"),
+        parse_expression("1 - 2*cos(2*x)"),
+    ]
+    assert any(simplify(main_final - form) == 0 for form in known_forms)
 
     ways = alternative_ways(parse_expression(expression))
     names = {way["name"] for way in ways}
@@ -632,7 +723,7 @@ def test_cos_double_angle_variants_are_all_offered(sample_formulas):
 
     # every alternative is kept only because it equals the main answer
     for way in ways:
-        assert way["steps"][-1]["latex"] != main_final or True
+        assert simplify(way["final"] - main_final) == 0
 
 
 def test_method_is_offered_for_a_part_nested_inside_the_expression(
@@ -754,3 +845,666 @@ def test_import_reads_notes_and_solutions(tmp_path):
 
     rejected = Path(summary["rejected_file"]).read_text(encoding="utf-8")
     assert "nonsense answer" in rejected
+
+
+# --- the elementary trig route's two operations ----------------------------
+def test_elementary_trig_operations_exist():
+    """The method catalogue needs the two ops the elementary route uses."""
+    from src.algebra.latex import to_latex
+    from src.knowledge.ops import known_operation, run_operation
+
+    assert known_operation("to_sin_cos")
+    assert known_operation("together")
+
+    expr = parse_expression("(1 + cot(x) - csc(x))*(1 + tan(x) + sec(x))")
+
+    rewritten, label = run_operation("to_sin_cos", expr)
+    assert label == "Write in terms of sin and cos"
+    assert "cot" not in to_latex(rewritten) and "sec" not in to_latex(rewritten)
+
+    combined, label = run_operation("together", rewritten)
+    assert label == "Take the LCM"
+    assert "\\frac" in to_latex(combined)   # everything over one denominator
+
+
+def test_all_in_sin_and_cos_method_reaches_two(sample_formulas):
+    """A stored method, not a SymPy jump, lands on SymPy's answer."""
+    from src.algebra.latex import to_latex
+
+    expr = parse_expression("(1 + cot(x) - csc(x))*(1 + tan(x) + sec(x))")
+    rows = store.find_methods(store.get_connection(), expr, for_ways=False)
+    row = next((r for r in rows if r["name"] == "All in sin and cos"), None)
+    assert row is not None, "the method must be offered for this expression"
+
+    steps, final = runner.run_method(expr, row["steps"], with_final=True)
+    assert [s["name"] for s in steps] == [
+        "Initial expression",
+        "Write in terms of sin and cos",
+        "Take the LCM",
+        "Simplify",
+    ]
+    assert to_latex(final) == "2"
+
+
+# --- stored formulas in BOTH directions ------------------------------------
+def test_stored_formulas_are_offered_backwards(sample_formulas):
+    """A = B must be usable as B -> A wherever the right-hand side shows up."""
+    from src.algebra.latex import to_latex
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _SolveState, _iter_changes
+
+    expr = parse_expression("sin(x)/cos(x)")
+    state = _SolveState(expr)   # the teaching walk: with_derived=False
+
+    hits = [(name, new) for new, name, _f, _r in
+            _iter_changes(expr, SIMPLIFY_RULES, True, state, with_derived=False)]
+
+    assert any(name == "Tangent as a Quotient (backwards)" for name, _ in hits)
+    assert any(to_latex(new) == "\\tan{\\left(x \\right)}" for _, new in hits)
+
+
+def test_a_formula_can_fire_inside_a_larger_expression(sample_formulas):
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _SolveState, _iter_changes
+
+    expr = parse_expression("2*(sin(y)^2 + cos(y)^2)")
+    state = _SolveState(expr)
+
+    names = [name for _new, name, _f, _r in
+             _iter_changes(expr, SIMPLIFY_RULES, True, state, with_derived=False)]
+
+    assert "Pythagorean Identity" in names
+
+
+def test_recently_added_rows_are_reachable_via_the_function_pass(tmp_path):
+    """A high-id row must be offered even when many older rows share its functions.
+
+    The gap batch is imported LAST here (its live situation: a row added
+    this session sits at the far end of the id order), so 17 shape matches
+    and 61 function matches with LOWER ids stand ahead of it. Pre-fix both
+    sources cut it (shape slice 16, function cap 8), the stored phase
+    yielded nothing, and the walk fell back to a shape rule ("Take the
+    LCM") instead of "Tan plus Cot is Two over Sin Two".
+    """
+    import os
+
+    from src.algebra.latex import to_latex_as_written
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _SolveState, _iter_changes
+
+    previous_db = os.environ.get("KNOWLEDGE_DB")
+    os.environ["KNOWLEDGE_DB"] = str(tmp_path / "knowledge.db")
+    try:
+        importer = load_importer()
+        samples = Path(__file__).resolve().parents[1] / "data" / "samples"
+        batches = [path for path in sorted(samples.glob("*.jsonl"))
+                   if ".rejected." not in path.name]
+        batches.sort(key=lambda path: path.name == "algebra.jsonl")
+        for batch in batches:
+            summary = importer.import_file(batch)
+            assert summary["rejected"] == 0, batch.name
+
+        expr = parse_expression("tan(x) + cot(x) + 2 - 2/sin(2*x)")
+        state = _SolveState(expr, frozenset(), to_latex_as_written(expr))
+        names = [name for _new, name, _f, _r in
+                 _iter_changes(expr, SIMPLIFY_RULES, True, state, with_derived=True)]
+        assert "Tan plus Cot is Two over Sin Two" in names
+    finally:
+        if previous_db is None:
+            os.environ.pop("KNOWLEDGE_DB", None)
+        else:
+            os.environ["KNOWLEDGE_DB"] = previous_db
+
+
+# --- history is the only permission rule ------------------------------------
+def test_formula_made_parts_are_not_off_limits(sample_formulas):
+    """History decides what may rewrite a part -- not who produced it."""
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _SolveState, _iter_changes
+
+    original = parse_expression("(1 + cot(x) - csc(x))*(1 + tan(x) + sec(x))")
+    state = _SolveState(original)   # sin(x)+cos(x)-1 has never been shown
+
+    node = parse_expression("sin(x) + cos(x) - 1")   # what an LCM step produced
+    names = [name for _new, name, _f, _r in
+             _iter_changes(node, SIMPLIFY_RULES, True, state, with_derived=False)]
+    assert "Combine a sin + b cos" in names
+
+
+def test_a_step_may_not_return_to_an_earlier_line():
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _SolveState, _apply_once
+
+    state = _SolveState(parse_expression("sin(2*x)"))   # already an earlier line
+    hit = _apply_once(parse_expression("2*sin(x)*cos(x)"),
+                      SIMPLIFY_RULES, True, state)
+
+    if hit is not None:
+        assert not state.revisits(hit[0])   # the natural move here is sin(2x)
+
+
+def test_teach_walk_gets_past_formula_output(sample_formulas):
+    """The reported bug: the walk died with sin+cos-1 untouched."""
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _teach
+
+    expr = parse_expression("(1 + cot(x) - csc(x))*(1 + tan(x) + sec(x))")
+    steps, _final = _teach(expr, SIMPLIFY_RULES, True, frozenset())
+
+    assert len(steps) >= 12   # it stopped at exactly 11 lines before this fix
+
+
+# --- the breadth-first search toward a target --------------------------------
+def test_bfs_reaches_the_target_with_named_steps(sample_formulas):
+    from src.algebra.latex import to_latex
+
+    expr = parse_expression("(1 + cot(x) - csc(x))*(1 + tan(x) + sec(x))")
+    assert moves is not None
+    assert to_latex(final) == "2"
+
+
+def test_main_route_shows_the_methods_steps(sample_formulas):
+    steps = steps_for("(1 + cot(x) - csc(x))*(1 + tan(x) + sec(x))")
+    assert [s["name"] for s in steps] == [
+        "Initial expression", "Write in terms of sin and cos",
+        "Take the LCM", "Simplify"]
+    assert steps[-1]["latex"] == "2"
+
+
+def test_no_goal_means_one_suggestion_not_a_walk():
+    # simplify() leaves sin(x)+cos(x) alone, so there is no goal to chase
+    steps = steps_for("sin(x) + cos(x)")
+    assert len(steps) == 2
+    assert steps[1]["name"] == "Combine a sin + b cos"
+
+
+def test_a_supplied_target_overrides_sympys_answer(sample_formulas):
+    from src.algebra.latex import to_latex
+
+    expr = parse_expression("sin(2*x)")
+    target = parse_expression("2*sin(x)*cos(x)")
+    steps = simplify_steps(expr, target=target)
+    assert steps[-1]["latex"] == to_latex(target)
+    assert [s["name"] for s in steps] == [
+        "Initial expression", "Double Angle for Sine"]
+
+
+# --- re-importing must refresh the derived indexes --------------------------
+def test_reimporting_a_formula_refreshes_its_function_index():
+    """A formula that already exists must still get the importer's NEW
+    view of it -- otherwise an index improvement never reaches rows that
+    are already in the database (the live DB lagged behind the code)."""
+    from src.knowledge import store as st
+
+    connection = st.get_connection()
+    entry = make_entry(name="Index Refresh Test",
+                       left="zzz(?a)", right="1/(?a)")
+    entry["functions"] = ["zzz"]           # the OLD, one-sided view
+    assert st.insert_entry(connection, entry) is True
+    connection.commit()
+
+    row = connection.execute(
+        "SELECT id FROM entries WHERE name = 'Index Refresh Test'").fetchone()
+    first = connection.execute(
+        "SELECT fn FROM function_index WHERE entry_id = ?", (row["id"],)
+    ).fetchall()
+    assert [r["fn"] for r in first] == ["zzz"]
+
+    entry["functions"] = ["zzz", "www"]    # the NEW, both-sides view
+    assert st.insert_entry(connection, entry) is False   # duplicate content
+    connection.commit()
+
+    after = {r["fn"] for r in connection.execute(
+        "SELECT fn FROM function_index WHERE entry_id = ?", (row["id"],))}
+    assert {"zzz", "www"} <= after         # the new view reached the old row
+
+
+# --- authored strategies (form-matched routes) -------------------------------
+def make_fake_strategy(name, final_expr=None, pad=0):
+    """A strategy that matches everything; returns None when final_expr
+    is None (did not reach). `pad` inserts that many detour lines before
+    the arrival, so two reaching strategies can have different lengths
+    for the shortest-first sort to fix."""
+    from src.algebra import strategies as st
+    from src.algebra.latex import to_latex
+    from src.algebra.steps import _initial_step
+
+    def matches(expr):
+        return True
+
+    def run(expr, target, banned, include_db):
+        if final_expr is None:
+            return None
+        steps = [_initial_step(expr)]
+        steps += [{"name": name, "latex": to_latex(expr)}] * pad
+        steps.append({"name": name, "latex": to_latex(final_expr)})
+        return steps, final_expr
+
+    return st.Strategy(name, matches, run)
+
+
+def test_product_of_sums_form_is_detected():
+    from src.algebra.strategies import _is_product_of_sums
+    assert _is_product_of_sums(parse_expression("(a + b + c)*(d + e)"))
+    assert _is_product_of_sums(parse_expression("(x + 1)*(y + 1)"))
+    assert not _is_product_of_sums(parse_expression("2*x + 3"))
+    assert not _is_product_of_sums(parse_expression("sin(x) + cos(x)"))
+
+
+def test_product_form_needs_only_one_multi_term_bracket():
+    from src.algebra.strategies import _is_product_of_sums
+    assert _is_product_of_sums(parse_expression("(1 - tan(x))*cos(x)"))
+    assert _is_product_of_sums(parse_expression("2*(x + 1)"))
+    assert not _is_product_of_sums(parse_expression("2*x*y"))   # no bracket
+    assert not _is_product_of_sums(parse_expression("sin(x) + cos(x)"))
+
+
+def test_expand_strategy_reaches_an_expanded_target():
+    from src.algebra.latex import to_latex
+
+    expr = parse_expression("(a + b + c)*(d + e)")
+    target = parse_expression("a*d + a*e + b*d + b*e + c*d + c*e")
+    steps = simplify_steps(expr, target=target)
+    assert [s["name"] for s in steps] == [
+        "Initial expression", "Expand brackets"]
+    assert steps[-1]["latex"] == to_latex(target)
+
+
+def test_termwise_pass_fires_root_work_after_the_children():
+    from src.algebra.latex import to_latex_as_written
+    from src.algebra.steps import _SolveState
+    from src.algebra.strategies import _termwise_move
+
+    expr = parse_expression("2*x + 3*x + 5 - 1")   # children alone cannot change
+    state = _SolveState(expr, frozenset(), to_latex_as_written(expr))
+    hit = _termwise_move(expr, state, True)
+    assert hit is not None
+    assert hit[1] == "Evaluate numbers"            # the root-level tidy move
+
+
+def test_a_strategy_that_misses_never_hijacks_the_route(monkeypatch):
+    from src.algebra import strategies as st
+    monkeypatch.setattr(st, "STRATEGIES",
+                        [make_fake_strategy("Always Late", final_expr=None)])
+    steps = steps_for("2*x + 3*x + 5 - 1")
+    assert [s["name"] for s in steps] == [
+        "Initial expression", "Evaluate numbers", "Combine like terms"]
+
+
+def test_shortest_reaching_strategy_wins_and_the_other_is_an_option(
+        monkeypatch):
+    from src.algebra import strategies as st
+    from src.algebra.steps import alternative_ways
+
+    five_x_four = parse_expression("5*x + 4")
+    monkeypatch.setattr(st, "STRATEGIES", [
+        make_fake_strategy("Long One", final_expr=five_x_four, pad=1),
+        make_fake_strategy("Short One", final_expr=five_x_four),
+    ])
+    # "Long One" listed first on purpose: sorting must fix the order.
+    steps = steps_for("2*x + 3*x + 5 - 1")
+    assert steps[1]["name"] == "Short One"
+
+    ways = alternative_ways(parse_expression("2*x + 3*x + 5 - 1"))
+    names = [way["name"] for way in ways]
+    assert "Long One" in names          # (5) the other one is an option
+    assert "Short One" not in names     # ...but never as its own alternative
+
+
+# --- Task 8c: ladder X (strategy route -> last resort -> suggestion) --------
+def test_strategy_row_is_imported_and_findable(sample_formulas):
+    rows = store.find_strategies(store.get_connection(), "product_of_sums")
+    assert [r["name"] for r in rows] == ["Expand then reduce"]
+    assert json.loads(rows[0]["steps"])[0] == {
+        "do": "expand", "scope": "whole", "until": "stuck"}
+
+
+def test_strategy_lives_in_its_own_table_not_in_entries(sample_formulas):
+    """A strategy row belongs to `strategies`; `entries` keeps formulas,
+    methods, notes and solutions -- no strategy kind is left behind."""
+    connection = store.get_connection()
+
+    row = connection.execute(
+        "SELECT * FROM strategies WHERE name = 'Expand then reduce'"
+    ).fetchone()
+    assert row is not None, "the shipped strategy must be in strategies"
+    assert row["form"] == "product_of_sums"
+    phases = json.loads(row["steps"])
+    assert isinstance(phases, list)          # the bare phase list, not a dict
+    assert len(phases) == 4
+
+    leftover = connection.execute(
+        "SELECT COUNT(*) FROM entries WHERE kind = 'strategy'"
+    ).fetchone()[0]
+    assert leftover == 0
+
+
+def test_product_strategy_runs_its_phases_end_to_end(sample_formulas):
+    """The user's four-phase strategy, executed on their example."""
+    from sympy import simplify
+
+    from src.algebra.latex import to_latex
+
+    expr = parse_expression("(1+tanx)(1-cotx)")
+    steps = simplify_steps(expr)
+    assert [s["name"] for s in steps] == [
+        "Initial expression", "Expand brackets", "Simplify",
+        "Collect like terms"]
+    # phase 4 (whole simplify) is a no-op on this input -> no step shown
+    assert steps[-1]["latex"] == to_latex(parse_expression("tan(x) - cot(x)"))
+    # it did not land on the goal, so the gap must say so
+    targets = {row["target"] for row in store.list_gaps()}
+    assert to_latex(simplify(expr)) in targets
+
+
+def test_walk_phase_applies_a_formula(sample_formulas):
+    from src.algebra.strategies import _run_phases
+
+    doc = {"phases": [{"do": "walk", "until": "stuck"}]}
+    result = _run_phases(doc, parse_expression("sin(x)^2 + cos(x)^2 + y"),
+                         parse_expression("y"), frozenset(), True)
+    assert result is not None
+    names = [s["name"] for s in result[0]]
+    assert "Pythagorean Identity" in names
+
+
+def test_ladder_last_resort_when_no_strategy_matches(sample_formulas):
+    steps = steps_for("2*x + 3*x + 5 - 1")
+    assert [s["name"] for s in steps] == ["Initial expression", "Simplify"]
+    assert steps[-1]["latex"] == "5 x + 4"
+    targets = {row["target"] for row in store.list_gaps()}
+    assert "5 x + 4" in targets
+
+
+def test_unreachable_user_target_gives_one_suggestion_and_a_gap(sample_formulas):
+    from src.algebra.latex import to_latex
+
+    steps = simplify_steps(parse_expression("sin(2*x)"),
+                           target=parse_expression("2*sin(x)*cos(x)"))
+    assert len(steps) == 2          # initial + one suggestion
+    targets = {row["target"] for row in store.list_gaps()}
+    assert to_latex(parse_expression("2*sin(x)*cos(x)")) in targets
+
+
+def test_rule_x_a_non_reaching_strategy_route_is_still_shown(monkeypatch):
+    """Rule X: the ONE route is kept even when the strategy missed."""
+    from src.algebra import strategies as st
+    from src.algebra.latex import to_latex
+
+    sideways = parse_expression("y")     # NOT the goal (5*x + 4)
+    monkeypatch.setattr(st, "STRATEGIES", [
+        make_fake_strategy("Goes Sideways", final_expr=sideways)])
+
+    steps = steps_for("2*x + 3*x + 5 - 1")
+    assert [s["name"] for s in steps] == [
+        "Initial expression", "Goes Sideways"]
+    assert steps[-1]["latex"] == to_latex(sideways)
+
+
+
+# --- the combination scope: pairwise-then-triple simplification ------------
+def test_combination_scope_combines_pairs_one_step_at_a_time(sample_formulas):
+    """Two terms merge first; the next combination is its own step."""
+    from src.algebra.strategies import _run_phases
+
+    doc = {"phases": [{"do": "simplify", "scope": "combination",
+                       "until": "stuck"}]}
+    expr = parse_expression("sin(x)^2 + cos(x)^2 + y")
+    result = _run_phases(doc, expr, parse_expression("z"), frozenset(), True)
+    assert result is not None
+    steps, final = result
+    # pair (sin^2, cos^2) combined -> 1; nothing else combines
+    assert final == parse_expression("1 + y")   # or to_latex equality if safer
+    assert len(steps) >= 2
+
+
+def test_combination_reaches_a_goal_via_growing_subsets(sample_formulas):
+    from sympy import simplify
+
+    from src.algebra.latex import to_latex
+
+    expr = parse_expression("(x + 1)*(sin(x)^2 + cos(x)^2)")
+    steps = simplify_steps(expr)   # strategy includes the new phase
+    assert steps[-1]["latex"] == to_latex(simplify(expr))   # goal reached
+    assert steps[1]["name"] == "Expand brackets"            # still the strategy's route
+
+
+def test_validate_strategy_accepts_combination_and_rejects_unknown_scope():
+    from src.algebra.strategies import validate_strategy
+
+    # the new scope is part of the shared vocabulary...
+    validate_strategy("product_of_sums", [
+        {"do": "simplify", "scope": "combination", "until": "stuck"}])
+
+    # ...and an unknown scope is still rejected by name
+    with pytest.raises(ValueError, match="scope"):
+        validate_strategy("product_of_sums", [
+            {"do": "simplify", "scope": "nowhere", "until": "stuck"}])
+
+
+def test_combination_ignores_results_that_are_still_a_sums(monkeypatch):
+    """A pair whose 'simplify' only re-spells a sum is NOT a combination."""
+    import src.algebra.strategies as st
+    from src.algebra.latex import to_latex_as_written
+
+    monkeypatch.setattr(st, "run_operation",
+                        lambda do, e: (e.func(*reversed(e.args)), "Simplify")
+                        if e.is_Add else (e, "Simplify"))
+    root = parse_expression("x + y + z")
+    state = st._SolveState(root, frozenset(), to_latex_as_written(root))
+    assert st._combination_move(root, "simplify", state) is None
+
+
+def test_combination_removes_terms_that_collapse_to_zero():
+    """sec - 1/cos -> 0 must DELETE both terms, never leave '+ 0'."""
+    from src.algebra.latex import to_latex, to_latex_as_written
+    from src.algebra.steps import _SolveState
+    from src.algebra.strategies import _combination_move
+
+    expr = parse_expression("sec(x) - 1/cos(x) + y")
+    state = _SolveState(expr, frozenset(), to_latex_as_written(expr))
+    move = _combination_move(expr, "simplify", state)
+    assert move is not None
+    new_root, entries, _rows = move
+    assert to_latex(new_root) == "y"          # both terms gone, no "0"
+    assert "0" not in entries[0]["latex"]
+
+
+def test_strategy_route_finishes_at_two_for_the_headline_input(sample_formulas):
+    """With the trigsimp combination phase, the product route lands on 2."""
+    steps = steps_for("(1+cotx-cscx)(1+tanx+secx)")
+    assert steps[-1]["latex"] == "2"
+
+
+# --- "fill SymPy's gaps": gate fallback, six rows, bracket scope, walk row ---
+def test_gate_fallback_proves_tan_plus_cot():
+    """The plain check cannot prove tan + cot = 2/sin(2a); the fallback
+    that rewrites both sides into sin/cos must return pass."""
+    from sympy import cot, sin, tan
+
+    a = symbols("a")
+    result = gate.verify_identity(tan(a) + cot(a), 2 / sin(2 * a))
+    assert result == ("pass", "SymPy proved both sides are equal")
+
+
+def test_six_new_identity_rows_are_imported_and_verified(sample_formulas):
+    """The six gap-filling rows are in the store, all proven by the gate."""
+    names = [
+        "Cotangent as Tan Reciprocal",
+        "Tan times Cot is One",
+        "Tan times Cosecant is Secant",
+        "Cot times Secant is Cosecant",
+        "Cosecant times Secant is Two over Sin Two",
+        "Tan plus Cot is Two over Sin Two",
+    ]
+    connection = store.get_connection()
+    placeholders = ",".join("?" * len(names))
+    rows = connection.execute(
+        f"SELECT name, verified FROM entries WHERE name IN ({placeholders})",
+        names,
+    ).fetchall()
+
+    assert len(rows) == 6
+    assert {row["name"] for row in rows} == set(names)
+    assert all(row["verified"] == 1 for row in rows)
+
+
+def test_sum_strategy_reaches_plain_arithmetic(sample_formulas):
+    """multi_term_sum route: 2x + 3x - 1 + 5 must reach 5x + 4 (and not as
+    a lone SymPy Simplify hop)."""
+    steps = steps_for("2*x + 3*x - 1 + 5")
+
+    assert steps[-1]["latex"] == "5 x + 4"
+    assert len(steps) >= 2
+    assert [step["name"] for step in steps] != ["Initial expression",
+                                                "Simplify"]
+
+
+def test_sum_strategy_combination_steps_for_plain_arithmetic(sample_formulas):
+    """BUG 3: the subset sum was built with evaluation ON, so
+    Add(2*x, 3*x) collapsed to 5*x BEFORE run_operation saw it -- the
+    sum strategy's first (combination) phase was dead and Factorise
+    showed instead. Built unevaluated, the combination phases own these
+    steps: pair (2x, 3x) -> 5x, then pair (-1, 5) -> 4, done."""
+    steps = steps_for("2*x + 3*x - 1 + 5")
+
+    assert [step["name"] for step in steps] == [
+        "Initial expression", "Simplify", "Simplify"]
+    assert steps[-1]["latex"] == "5 x + 4"
+
+
+def test_new_strategy_finds_the_power_difference(sample_formulas):
+    """The multi_term_sum strategy must get to work on sin^8 - cos^8."""
+    steps = steps_for("sin(x)^8 - cos(x)^8")
+    assert steps[1]["name"] == "Factorise"
+
+
+def test_bracket_scope_combines_inside_a_factor():
+    """scope 'bracket': one visible step that combines inside a factor.
+
+    The plan's example root (x + 1)*(2*y + 3*y + 1) parses with its three
+    terms intact, but _combination_move re-builds the subset with
+    evaluate=True, so 2*y + 3*y collapses BEFORE run_operation sees it and
+    no visible combination exists -- therefore a bracket whose pair only
+    SymPy can fold (sin^2 + cos^2 -> 1) is used instead.
+    """
+    from src.algebra.latex import to_latex, to_latex_as_written
+    from src.algebra.steps import _SolveState
+    from src.algebra.strategies import _phase_move
+
+    root = parse_expression("(x + 1)*(sin(x)^2 + cos(x)^2 + y)")
+    state = _SolveState(root, frozenset(), to_latex_as_written(root))
+    hit = _phase_move(root, "simplify", "bracket", state)
+
+    assert hit is not None
+    new_root, entries, _rows = hit
+    assert entries[0]["latex"] == "y + 1"             # inside the bracket
+    assert to_latex(new_root) == "\\left(x + 1\\right) \\left(y + 1\\right)"
+
+
+def test_walk_phase_applies_the_new_sum_row(sample_formulas):
+    """A bare walk phase on tan + cot + 2 - 2/sin(2x): the new identity
+    row must fire and the walk must land on 2."""
+    from src.algebra.strategies import _run_phases
+
+    doc = {"phases": [{"do": "walk", "until": "stuck"}]}
+    expr = parse_expression("tan(x) + cot(x) + 2 - 2/sin(2*x)")
+    result = _run_phases(doc, expr, parse_expression("2"), frozenset(), True)
+
+    assert result is not None
+    steps, final = result
+    assert steps[1]["name"] == "Tan plus Cot is Two over Sin Two"
+    assert "\\frac{2}{\\sin{\\left(2 x \\right)}}" in steps[1]["latex"]
+    assert steps[-1]["latex"] == "2"
+
+
+# --- BUG 1: _derived_hits must skip variants that leak a free Wild ---------
+def test_derived_hits_never_leak_a_free_wild(sample_formulas):
+    """A partial variant match keeps an unbound Wild hole: showing it
+    prints garbage (the user's screenshot, step 12).
+
+    Natural trigger (found by replaying the product strategy's route for
+    (1+cotx-cscx)(1+tanx+secx) state by state): the first offending
+    state is index 9, leaking through `Rearrange: Combine a sin + b cos`.
+    The test replays the same route (aborting once 10 states -- the
+    window containing that first offender -- are recorded) and asserts
+    the plan's condition for every recorded state: no yield of
+    _iter_changes(..., with_derived=True) may carry a free Wild. The
+    later route states shift with D2, so the window is capped, not the
+    whole 21-state walk.
+    """
+    from sympy import Wild, simplify
+
+    from src.algebra import strategies as st
+    from src.algebra.latex import to_latex
+    from src.algebra.rules import SIMPLIFY_RULES
+    from src.algebra.steps import _iter_changes, _SolveState
+
+    WINDOW = 10   # states checked: enough to include offender index 9
+
+    class _Enough(Exception):
+        pass
+
+    recorded = []
+
+    class RecordingState(_SolveState):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            recorded.append(self)
+
+        def record(self, expr, display_latex=""):
+            super().record(expr, display_latex)
+            if len(self.history) >= WINDOW:
+                raise _Enough   # the window is full: stop replaying
+
+    expr = parse_expression("(1+cotx-cscx)(1+tanx+secx)")
+    original = st._SolveState
+    st._SolveState = RecordingState
+    try:
+        try:
+            for strategy in st.matching_strategies(expr):
+                if strategy.name == "Expand then reduce":
+                    strategy.run(expr, simplify(expr), frozenset(), True)
+                    break
+        except _Enough:
+            pass
+    finally:
+        st._SolveState = original
+
+    assert recorded, "the product strategy must run"
+    history = recorded[-1].history
+    assert 3 <= len(history) <= WINDOW   # the route really walked somewhere
+
+    leaks = []
+    for state_expr in history:
+        state = _SolveState(state_expr, frozenset(), to_latex(state_expr))
+        for new_expr, name, _formula, _row in _iter_changes(
+                state_expr, SIMPLIFY_RULES, True, state, with_derived=True):
+            wilds = [h for h in new_expr.free_symbols if isinstance(h, Wild)]
+            if wilds:
+                leaks.append((to_latex(state_expr), name, wilds))
+    assert leaks == [], (
+        f"{len(leaks)} state(s) leaked a free Wild, "
+        f"first: {leaks[0][1]} {leaks[0][2]}"
+    )
+
+
+def test_combination_cancels_all_zero_pairs_before_merging_anything():
+    """'Cancel until stuck': both zero-pairs must be gone before any merge."""
+    from src.algebra.latex import to_latex, to_latex_as_written
+    from src.algebra.strategies import _combination_move
+    from src.algebra.steps import _SolveState
+
+    expr = parse_expression(
+        "tan(x) + cot(x) - csc(x) + sec(x) + 2 - 1/cos(x) - 2/sin(2*x) + 1/sin(x)")
+    state = _SolveState(expr, frozenset(), to_latex_as_written(expr))
+
+    first = _combination_move(expr, "simplify", state)
+    assert first is not None
+    state2 = _SolveState(first[0], frozenset(), to_latex(first[0]))
+    second = _combination_move(first[0], "simplify", state2)
+    assert second is not None
+    latex = to_latex(second[0])
+    # after two rounds BOTH cancellations must be complete:
+    for gone in ("\\sec", "\\csc", "1}{\\cos", "1}{\\sin"):
+        assert gone not in latex, f"{gone} survived two cancel rounds: {latex}"

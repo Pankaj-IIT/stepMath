@@ -196,6 +196,25 @@ def _squared_functions(expr: Expr) -> set:
     return found
 
 
+def mentioned_functions(expr: Expr) -> set:
+    """Names of the trig functions this expression uses (as strings).
+
+    Feeds the function index: a node containing sin() can only be helped
+    by formulas whose left side also mentions sin() -- that is how the
+    thinker finds candidate rows even when their SHAPE differs from the
+    node (e.g. deriving  1 - sin^2 = cos^2  from the Pythagorean row
+    while looking at the node  1 - sin^2).
+    """
+    found = set()
+    pending = [expr]
+    while pending:
+        node = pending.pop()
+        if node.func in _TRIG and len(node.args) == 1:
+            found.add(node.func.__name__)
+        pending.extend(node.args)
+    return found
+
+
 def _classify_product(expr: Expr, tags: set) -> None:
     """Mul nodes: products of trig functions (product-to-sum family)."""
     described = _trig_term(expr)

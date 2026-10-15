@@ -1,18 +1,29 @@
 """
 store.py -- all the reading and writing of data/knowledge.db.
 
-One table holds everything:
+Formulas and methods share one table:
 
     entries(
-        id, kind ('identity' | 'method'), name, statement (LaTeX for show),
+        id, kind ('identity' | 'method' | 'note' | 'solution'),
+        name, statement (LaTeX for show),
         left, right      -- identity: the formula itself
-        steps            -- method: its steps, ALL inside this one row
+        steps            -- method: its steps (JSON), ALL in this row
         signature        -- shape of the left side   (how we find it fast)
         applies_to       -- method: shape of its first step, or 'any'
         verified         -- 1 = trustworthy (passed the gate / approved)
         origin, source   -- 'ai' | 'hand', and which batch file it came from
         usage_count      -- how often it fired (we try popular ones first)
         dedup_key        -- stops the same formula being imported twice
+    )
+
+Strategies have their own table (they are a form plus phases, and none of
+the formula columns above apply to them):
+
+    strategies(
+        id, name, form (a key of strategies._FORMS),
+        steps      -- JSON list of phases
+        dedup_key  -- f"{form}::{phases-json}", UNIQUE
+        usage_count, origin, source, created
     )
 
 Plus a small full-text table for the search box (name + statement only).
@@ -26,7 +37,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from sympy import Add, Mul, Expr
 
@@ -68,6 +79,25 @@ CREATE INDEX IF NOT EXISTS idx_entries_methods
 CREATE INDEX IF NOT EXISTS idx_entries_review
     ON entries(verified, id);
 
+-- Strategies live in their OWN table: a strategy is a form plus its
+-- phases -- it carries none of the formula columns (left/right/signature/
+-- statement/panel/verified) a row in `entries` would have to drag along.
+-- `name` is deliberately NOT unique: renaming and duplicate creation are
+-- the API's decisions to make, not the schema's.
+CREATE TABLE IF NOT EXISTS strategies (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    form        TEXT NOT NULL,          -- a key of strategies._FORMS
+    steps       TEXT NOT NULL,          -- JSON list of phases (name kept
+                                        -- for compatibility with tests/API)
+    dedup_key   TEXT NOT NULL UNIQUE,   -- f"{form}::{phases-json}"
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    origin      TEXT NOT NULL DEFAULT 'hand',
+    source      TEXT,
+    created     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_strategies_form ON strategies(form);
+
 CREATE TABLE IF NOT EXISTS group_members (
     group_name TEXT NOT NULL,   -- a family from classify.py, e.g. two-angle-sum
     entry_id   INTEGER NOT NULL,
@@ -75,6 +105,27 @@ CREATE TABLE IF NOT EXISTS group_members (
 );
 
 CREATE INDEX IF NOT EXISTS idx_group_members ON group_members(group_name);
+
+CREATE TABLE IF NOT EXISTS function_index (
+    fn         TEXT NOT NULL,   -- 'sin', 'cos', ... mentioned on the left
+    entry_id   INTEGER NOT NULL,
+    PRIMARY KEY (fn, entry_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_function_index ON function_index(fn);
+
+CREATE TABLE IF NOT EXISTS proof_cache (
+    key    TEXT PRIMARY KEY,   -- fingerprint of one derived variant
+    verdict TEXT NOT NULL      -- 'pass' | 'fail' | 'unknown'
+);
+
+CREATE TABLE IF NOT EXISTS gaps (
+    target  TEXT PRIMARY KEY,  -- the simpler form SymPy suggested
+    example TEXT NOT NULL,     -- one input that could not reach it
+    tried   TEXT NOT NULL DEFAULT '',  -- strategies we attempted
+    hits    INTEGER NOT NULL DEFAULT 1,
+    created TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts
     USING fts5(name, statement);
@@ -140,6 +191,37 @@ def dedup_key(kind: str, left: Optional[str], right: Optional[str],
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def _refresh_indexes(connection: sqlite3.Connection, entry_id: int,
+                     entry: dict) -> None:
+    """Re-derive function_index / group_members for a row we already have.
+
+    Called when a duplicate arrives: the formula itself is unchanged, but
+    the importer's VIEW of it (which functions and families it mentions)
+    may have improved since the row was first written.  A caller that does
+    not carry the key at all leaves the stored rows alone -- only an
+    explicit "here is my view" replaces them.
+    """
+    if "functions" in entry:
+        connection.execute(
+            "DELETE FROM function_index WHERE entry_id = ?", (entry_id,))
+        for fn_name in entry.get("functions") or []:
+            connection.execute(
+                "INSERT OR IGNORE INTO function_index (fn, entry_id) "
+                "VALUES (?, ?)",
+                (fn_name, entry_id),
+            )
+
+    if "groups" in entry:
+        connection.execute(
+            "DELETE FROM group_members WHERE entry_id = ?", (entry_id,))
+        for group_name in entry.get("groups") or []:
+            connection.execute(
+                "INSERT OR IGNORE INTO group_members (group_name, entry_id) "
+                "VALUES (?, ?)",
+                (group_name, entry_id),
+            )
+
+
 def insert_entry(connection: sqlite3.Connection, entry: dict) -> bool:
     """Add one entry. Returns False when we already have it (duplicate)."""
     try:
@@ -165,6 +247,16 @@ def insert_entry(connection: sqlite3.Connection, entry: dict) -> bool:
     except sqlite3.IntegrityError as error:
         if "dedup_key" not in str(error):
             raise  # some OTHER problem -- do not hide it behind "duplicate"
+        # We already have this formula -- but the stored row may predate an
+        # importer improvement, so its derived indexes are refreshed from
+        # THIS entry's view before we report the duplicate.  (Without this,
+        # a row imported by the left-side-only era never gains the indexes
+        # the current code computes -- the live database lagged the code.)
+        existing = connection.execute(
+            "SELECT id FROM entries WHERE dedup_key = ?", (entry["dedup_key"],)
+        ).fetchone()
+        if existing is not None:
+            _refresh_indexes(connection, existing["id"], entry)
         return False  # we already have this exact formula
 
     # Which formula families this row belongs to (see classify.py).
@@ -173,6 +265,14 @@ def insert_entry(connection: sqlite3.Connection, entry: dict) -> bool:
             "INSERT OR IGNORE INTO group_members (group_name, entry_id) "
             "VALUES (?, ?)",
             (group_name, cursor.lastrowid),
+        )
+
+    # Which functions either side mentions (the thinker's third source:
+    # "what formulas could touch a node containing sin?").
+    for fn_name in entry.get("functions") or []:
+        connection.execute(
+            "INSERT OR IGNORE INTO function_index (fn, entry_id) VALUES (?, ?)",
+            (fn_name, cursor.lastrowid),
         )
 
     connection.execute(
@@ -259,6 +359,96 @@ def find_by_groups(connection: sqlite3.Connection, tags: "list | set",
     ).fetchall()
 
 
+def record_gap(target: str, example: str, tried: str) -> None:
+    """Remember a simplification SymPy found that we cannot explain yet.
+
+    This is the "plug the strategy if missing" list: each row is a target
+    we should one day reach with a formula or a named strategy.
+    """
+    try:
+        connection = get_connection()
+        connection.execute(
+            """
+            INSERT INTO gaps (target, example, tried, hits)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(target) DO UPDATE SET
+                hits = hits + 1,
+                example = excluded.example,
+                tried = excluded.tried
+            """,
+            (target, example, tried),
+        )
+        connection.commit()
+    except Exception:
+        pass  # bookkeeping must never break a solve
+
+
+def list_gaps(limit: int = 30) -> List:
+    """The unexplained simplifications, most frequently hit first."""
+    try:
+        return get_connection().execute(
+            "SELECT target, example, tried, hits FROM gaps "
+            "ORDER BY hits DESC, created DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+
+
+def cached_verdict(key: str) -> "str | None":
+    """The stored proof verdict for a derived variant ('pass'/'fail'/...).
+
+    Deriving a variant costs a SymPy proof (~100ms+); this makes it a
+    one-time cost per variant instead of one per process.
+    """
+    try:
+        row = get_connection().execute(
+            "SELECT verdict FROM proof_cache WHERE key = ?", (key,)
+        ).fetchone()
+        return row["verdict"] if row else None
+    except Exception:
+        return None
+
+
+def remember_verdict(key: str, verdict: str) -> None:
+    try:
+        connection = get_connection()
+        connection.execute(
+            "INSERT OR REPLACE INTO proof_cache (key, verdict) VALUES (?, ?)",
+            (key, verdict),
+        )
+        connection.commit()
+    except Exception:
+        pass  # a cache miss is never fatal
+
+
+def find_by_functions(connection: sqlite3.Connection, functions: "list | set",
+                      limit: int = 8) -> List[sqlite3.Row]:
+    """Verified identity rows whose left side mentions any of these
+    functions.
+
+    The thinker's third source: the node 1 - sin^2 does not SHAPE-match
+    the Pythagorean row, but both mention sin, so the row (and its derived
+    rearrangements) still get a chance there.
+    """
+    functions = list(functions)
+    if not functions:
+        return []
+
+    placeholders = ",".join("?" * len(functions))
+    return connection.execute(
+        f"""
+        SELECT DISTINCT e.* FROM function_index fi
+        JOIN entries e ON e.id = fi.entry_id
+        WHERE fi.fn IN ({placeholders})
+          AND e.kind = 'identity' AND e.verified = 1
+        ORDER BY e.usage_count DESC, e.id
+        LIMIT ?
+        """,
+        (*functions, limit),
+    ).fetchall()
+
+
 def find_methods(connection: sqlite3.Connection, expr: Expr,
                  limit: int = 20, for_ways: bool = False) -> List[sqlite3.Row]:
     """Trusted methods that could start on this expression.
@@ -308,6 +498,89 @@ def find_methods(connection: sqlite3.Connection, expr: Expr,
         """,
         (*params, shape, limit),
     ).fetchall()
+
+
+def find_strategies(connection: sqlite3.Connection, form: str) -> List[sqlite3.Row]:
+    """Strategy rows authored for this form, in id order.
+
+    A strategy applies to a FORM (a key of strategies._FORMS), not to a
+    shape: strategies.py asks for the rows of every form whose matcher
+    accepts the expression. Id order keeps the set stable across runs.
+    """
+    return connection.execute(
+        "SELECT * FROM strategies WHERE form = ? ORDER BY id",
+        (form,),
+    ).fetchall()
+
+
+def list_strategies(connection: sqlite3.Connection) -> List[sqlite3.Row]:
+    """Every strategy row, in id order -- the Strategies tab's list."""
+    return connection.execute(
+        "SELECT * FROM strategies ORDER BY id"
+    ).fetchall()
+
+
+def get_strategy(connection: sqlite3.Connection,
+                 strategy_id: int) -> Optional[sqlite3.Row]:
+    """One strategy row by id (None when it does not exist)."""
+    return connection.execute(
+        "SELECT * FROM strategies WHERE id = ?", (strategy_id,)
+    ).fetchone()
+
+
+def insert_strategy(connection: sqlite3.Connection, name: str, form: str,
+                    phases_json: str, origin: str = "hand",
+                    source: Optional[str] = None) -> int:
+    """Add one strategy; returns its new id.
+
+    Validates nothing -- the API and the importer both run every row
+    through strategies.validate_strategy first, so the two can never
+    disagree. The fingerprint is simply form::phases: the same form with
+    the same phases is the same strategy, however it was written. A
+    collision (another row already carries it) is reported as a friendly
+    ValueError instead of leaking a raw SQL error -- that is exactly what
+    the POST route answers with. The CALLER commits (this file only ever
+    writes).
+    """
+    key = f"{form}::{phases_json}"
+    try:
+        cursor = connection.execute(
+            "INSERT INTO strategies (name, form, steps, dedup_key, origin, source) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (name, form, phases_json, key, origin, source),
+        )
+    except sqlite3.IntegrityError as error:
+        if "dedup_key" not in str(error):
+            raise  # some OTHER problem -- do not hide it behind "duplicate"
+        raise ValueError("a strategy like this already exists")
+    return cursor.lastrowid
+
+
+def update_strategy(connection: sqlite3.Connection, strategy_id: int,
+                    name: str, form: str, steps_json: str) -> None:
+    """Rewrite a strategy's name/form/phases, keeping its dedup honest.
+
+    The fingerprint mirrors insert_strategy's: form + phases. A collision
+    means another row already carries this exact form and phases, which is
+    reported as a ValueError instead of leaking a raw SQL error. The
+    CALLER commits.
+    """
+    key = f"{form}::{steps_json}"
+    try:
+        connection.execute(
+            "UPDATE strategies SET name = ?, form = ?, steps = ?, "
+            "dedup_key = ? WHERE id = ?",
+            (name, form, steps_json, key, strategy_id),
+        )
+    except sqlite3.IntegrityError as error:
+        if "dedup_key" not in str(error):
+            raise  # some OTHER problem -- do not hide it behind "duplicate"
+        raise ValueError("a strategy like this already exists")
+
+
+def delete_strategy(connection: sqlite3.Connection, strategy_id: int) -> None:
+    """Throw one strategy away. The CALLER commits."""
+    connection.execute("DELETE FROM strategies WHERE id = ?", (strategy_id,))
 
 
 def search(connection: sqlite3.Connection, query: str = "",

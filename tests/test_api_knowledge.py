@@ -157,3 +157,101 @@ def test_method_starting_with_a_pattern_is_offered_by_shape():
     assert response.status_code == 200
     names = [entry["name"] for entry in response.json()["entries"]]
     assert "Squares Method" in names
+
+
+def test_gaps_endpoint_lists_strategies_we_cannot_reach():
+    store.record_gap("x^5 + x^5", "x^5 + x^5", "Combine like terms")
+
+    response = client.get("/api/gaps")
+
+    assert response.status_code == 200
+    gaps = response.json()["gaps"]
+    assert any(
+        gap["target"] == "x^5 + x^5" and "Combine like terms" in gap["tried"]
+        for gap in gaps
+    )
+
+
+# --- the Strategies tab: list, vocabulary, create, edit, delete -------------
+def test_strategies_endpoint_lists_the_shipped_strategy(sample_formulas):
+    response = client.get("/api/strategies")
+
+    assert response.status_code == 200
+    strategies = response.json()["strategies"]
+    shipped = [s for s in strategies if s["name"] == "Expand then reduce"]
+    assert shipped, "the shipped strategy must appear in the list"
+    assert shipped[0]["form"] == "product_of_sums"
+    assert len(shipped[0]["phases"]) == 4
+
+
+def test_strategy_meta_describes_the_vocabulary(sample_formulas):
+    response = client.get("/api/strategy-meta")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "product_of_sums" in body["forms"]
+    assert "walk" in body["dos"]
+    assert "simplify" in body["dos"]
+    assert body["scopes"] == ["whole", "term"]
+    assert body["untils"] == ["stuck", "once"]
+
+
+def test_a_new_strategy_can_be_created_and_deleted(sample_formulas):
+    created = client.post("/api/strategies", json={
+        "name": "Scratch Walk First",
+        "form": "product_of_sums",
+        "phases": [{"do": "walk", "scope": "whole", "until": "stuck"}],
+    })
+    assert created.status_code == 200
+    entry_id = created.json()["id"]
+
+    names = [s["name"]
+             for s in client.get("/api/strategies").json()["strategies"]]
+    assert "Scratch Walk First" in names
+
+    deleted = client.delete(f"/api/strategies/{entry_id}")
+    assert deleted.status_code == 200
+
+    names = [s["name"]
+             for s in client.get("/api/strategies").json()["strategies"]]
+    assert "Scratch Walk First" not in names
+
+
+def test_post_with_an_invalid_phase_names_the_phase(sample_formulas):
+    response = client.post("/api/strategies", json={
+        "name": "Bad Phase Strategy",
+        "form": "product_of_sums",
+        "phases": [{"do": "nope", "scope": "whole", "until": "stuck"}],
+    })
+
+    assert response.status_code == 400
+    assert "phase 1" in response.json()["error"]
+
+
+def test_put_updates_a_strategy_without_duplicating_it(sample_formulas):
+    created = client.post("/api/strategies", json={
+        "name": "Scratch To Rename",
+        "form": "product_of_sums",
+        "phases": [{"do": "expand", "scope": "whole", "until": "stuck"}],
+    })
+    assert created.status_code == 200
+    entry_id = created.json()["id"]
+    before = len(client.get("/api/strategies").json()["strategies"])
+
+    updated = client.put(f"/api/strategies/{entry_id}", json={
+        "name": "Scratch Renamed",
+        "form": "product_of_sums",
+        "phases": [
+            {"do": "expand", "scope": "whole", "until": "stuck"},
+            {"do": "collect", "scope": "whole", "until": "once"},
+        ],
+    })
+    assert updated.status_code == 200
+
+    after = client.get("/api/strategies").json()["strategies"]
+    assert len(after) == before            # updated in place, no duplicate
+    mine = [s for s in after if s["id"] == entry_id]
+    assert mine and mine[0]["name"] == "Scratch Renamed"
+    assert len(mine[0]["phases"]) == 2
+
+    client.delete(f"/api/strategies/{entry_id}")   # leave no scratch behind

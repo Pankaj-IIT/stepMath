@@ -1,0 +1,3 @@
+(1+cotx-cscx)(1+tanx+secx)
+(tanx+secx-1)/(tanx-secx+1)
+sinx^8-cosx^8

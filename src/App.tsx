@@ -16,6 +16,12 @@ interface SolveResponse {
   alternatives?: AlternativeWay[]; // other routes to the same answer
 }
 
+interface AskResponse extends SolveResponse {
+  intent?: string; // simplify | prove | solve | ...
+  explanation?: string; // why the app read the question that way
+  proven?: boolean | null; // only for prove
+}
+
 interface AlternativeWay {
   name: string; // the first move of that route
   steps: Step[];
@@ -23,7 +29,7 @@ interface AlternativeWay {
 
 interface Entry {
   id: number;
-  kind: string; // 'identity' | 'method' | 'note' | 'solution'
+  kind: string; // 'identity' | 'method' | 'strategy' | 'note' | 'solution'
   name: string;
   statement: string; // LaTeX, may be empty
   steps: string | null; // methods only: their steps as JSON text
@@ -41,6 +47,28 @@ interface EntryList {
 
 interface ErrorResponse {
   error?: string;
+}
+
+interface StrategyPhase {
+  do: string; // "walk" or a known operation name
+  scope: string; // "whole" | "term"
+  until: string; // "stuck" | "once"
+}
+
+interface Strategy {
+  id: number;
+  name: string;
+  form: string;
+  phases: StrategyPhase[];
+  verified: number;
+  usage_count: number;
+}
+
+interface StrategyVocabulary {
+  forms: string[];
+  dos: string[];
+  scopes: string[];
+  untils: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +112,10 @@ function methodSummary(stepsJson: string | null): string {
   }
 }
 
+// One solution for now: the "other ways" block below is held for a later
+// version (the JSX stays, this switch just keeps it off screen).
+const SHOW_ALTERNATIVE_WAYS = false;
+
 // Style for the little round labels (the text goes in the element's children).
 // Colour of the little round label for each kind of entry.
 const KIND_COLOR: Record<string, string> = {
@@ -121,12 +153,34 @@ const CARD = (borderColor: string): React.CSSProperties => ({
   borderLeft: `4px solid ${borderColor}`,
 });
 
+// Text fields for the Strategies add/edit panel (same look as the
+// search box and the Solve input).
+const INPUT: React.CSSProperties = {
+  width: '100%',
+  padding: '10px 14px',
+  borderRadius: '8px',
+  border: '1px solid #475569',
+  background: '#0f172a',
+  color: '#f8fafc',
+  fontSize: '1rem',
+  boxSizing: 'border-box',
+};
+
+const SELECT: React.CSSProperties = {
+  padding: '8px 10px',
+  borderRadius: '8px',
+  border: '1px solid #475569',
+  background: '#0f172a',
+  color: '#f8fafc',
+  fontSize: '0.85rem',
+};
+
 // ---------------------------------------------------------------------------
 // The app
 // ---------------------------------------------------------------------------
 export default function App() {
   // --- which page ---------------------------------------------------------
-  const [tab, setTab] = useState<'solve' | 'formulas'>('solve');
+  const [tab, setTab] = useState<'solve' | 'formulas' | 'strategies'>('solve');
 
   // --- solve page ---------------------------------------------------------
   const [inputStr, setInputStr] = useState('2*x + 3*x + 5 - 1');
@@ -135,6 +189,8 @@ export default function App() {
   const [alternatives, setAlternatives] = useState<AlternativeWay[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  // How the app understood the question ("PROVE -- it starts with ...").
+  const [reading, setReading] = useState<{ intent: string; explanation: string } | null>(null);
 
   // --- formulas page ------------------------------------------------------
   const [query, setQuery] = useState('');
@@ -143,9 +199,28 @@ export default function App() {
   const [families, setFamilies] = useState<
     { name: string; description: string; count: number }[]
   >([]);
+  // Simplifications SymPy found that we cannot reach with steps yet --
+  // the "strategies to plug" list for whoever supplies formulas.
+  const [gaps, setGaps] = useState<
+    { target: string; example: string; tried: string; hits: number }[]
+  >([]);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [counts, setCounts] = useState({ total: 0, verified: 0, needs_review: 0 });
   const [formulaError, setFormulaError] = useState<string | null>(null);
+
+  // --- strategies page ----------------------------------------------------
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [vocab, setVocab] = useState<StrategyVocabulary | null>(null);
+  const [strategyError, setStrategyError] = useState<string | null>(null);
+  // The add/edit panel: null = closed; id null = adding a new strategy.
+  const [draft, setDraft] = useState<{
+    id: number | null;
+    name: string;
+    form: string;
+    phases: StrategyPhase[];
+  } | null>(null);
+  // Bumped after every successful save/delete -> the list refetches.
+  const [strategyKey, setStrategyKey] = useState(0);
 
   // Ask the server for automatic steps whenever the text/mode changes.
   useEffect(() => {
@@ -155,19 +230,33 @@ export default function App() {
     // for every single letter.
     const timer = setTimeout(async () => {
       try {
-        const data = await api<SolveResponse>('/api/solve', {
+        // Simplify mode goes through the QUESTION layer (it can spot
+        // "prove that ... = ..." inside the box); the Solve toggle keeps
+        // the direct equation endpoint.
+        const isEquation = mode === 'solve';
+        const data = await api<AskResponse>(isEquation ? '/api/solve' : '/api/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ expression: inputStr, mode }),
+          body: JSON.stringify(isEquation
+            ? { expression: inputStr, mode }
+            : { question: inputStr }),
           signal: controller.signal,
         });
         setSteps(data.steps);
         setAlternatives(data.alternatives ?? []);
+        // Only show the banner when it recognised a QUESTION FORM --
+        // a plain expression gets no banner (that would be noise).
+        setReading(
+          data.intent && data.intent !== 'simplify'
+            ? { intent: data.intent, explanation: data.explanation ?? '' }
+            : null
+        );
         setError(null);
       } catch (err: any) {
         if (err?.name === 'AbortError') return; // user kept typing, ignore
         setSteps([]);
         setAlternatives([]);
+        setReading(null);
         setError(err?.message ?? 'Cannot reach the Python server. Start it with:  npm run api');
       }
     }, 300);
@@ -214,11 +303,49 @@ export default function App() {
       } catch {
         if (!cancelled) setFamilies([]); // no database: no chips
       }
+      try {
+        const data = await api<{ gaps: { target: string; example: string; tried: string; hits: number }[] }>(
+          '/api/gaps'
+        );
+        if (!cancelled) setGaps(data.gaps);
+      } catch {
+        if (!cancelled) setGaps([]);
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, [tab, refreshKey]);
+
+  // Load the strategy list (and the phases vocabulary) when the tab
+  // opens -- and again after every save/delete.
+  useEffect(() => {
+    if (tab !== 'strategies') return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api<{ strategies: Strategy[] }>('/api/strategies');
+        if (!cancelled) {
+          setStrategies(data.strategies);
+          setStrategyError(null);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setStrategyError(err?.message ?? 'Could not load the strategies.');
+        }
+      }
+      try {
+        const data = await api<StrategyVocabulary>('/api/strategy-meta');
+        if (!cancelled) setVocab(data);
+      } catch {
+        if (!cancelled) setVocab(null); // no server: the selects stay empty
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, strategyKey]);
 
   // --- actions ------------------------------------------------------------
   const review = async (entryId: number, approve: boolean) => {
@@ -230,6 +357,87 @@ export default function App() {
     } catch (err: any) {
       setFormulaError(err?.message ?? 'That did not work.');
     }
+  };
+
+  // --- strategies: open the panel, save, delete ---------------------------
+  const startAddStrategy = () => {
+    setStrategyError(null);
+    setDraft({
+      id: null,
+      name: '',
+      form: vocab?.forms[0] ?? '',
+      phases: [{ do: 'walk', scope: 'whole', until: 'stuck' }],
+    });
+  };
+
+  const startEditStrategy = (strategy: Strategy) => {
+    setStrategyError(null);
+    setDraft({
+      id: strategy.id,
+      name: strategy.name,
+      form: strategy.form,
+      phases: strategy.phases.map((phase) => ({ ...phase })),
+    });
+  };
+
+  const closeStrategyPanel = () => {
+    setDraft(null);
+    setStrategyError(null);
+  };
+
+  // Instant save: POST when adding, PUT when editing; on an API error the
+  // server's message is shown (same pattern as the other pages).
+  const saveStrategy = async () => {
+    if (!draft) return;
+    try {
+      await api(draft.id === null ? '/api/strategies' : `/api/strategies/${draft.id}`, {
+        method: draft.id === null ? 'POST' : 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: draft.name, form: draft.form, phases: draft.phases }),
+      });
+      setDraft(null);
+      setStrategyKey((key) => key + 1); // reload the list
+    } catch (err: any) {
+      setStrategyError(err?.message ?? 'That did not work.');
+    }
+  };
+
+  const deleteStrategy = async (strategy: Strategy) => {
+    if (!window.confirm(`Delete the strategy "${strategy.name}"?`)) return;
+    try {
+      await api(`/api/strategies/${strategy.id}`, { method: 'DELETE' });
+      setStrategyKey((key) => key + 1); // reload the list
+    } catch (err: any) {
+      setStrategyError(err?.message ?? 'That did not work.');
+    }
+  };
+
+  const setPhaseField = (
+    index: number,
+    field: 'do' | 'scope' | 'until',
+    value: string
+  ) => {
+    if (!draft) return;
+    const phases = draft.phases.map((phase, i) => {
+      if (i !== index) return phase;
+      const next = { ...phase };
+      next[field] = value;
+      return next;
+    });
+    setDraft({ ...draft, phases });
+  };
+
+  const removePhase = (index: number) => {
+    if (!draft) return;
+    setDraft({ ...draft, phases: draft.phases.filter((_, i) => i !== index) });
+  };
+
+  const addPhase = () => {
+    if (!draft) return;
+    setDraft({
+      ...draft,
+      phases: [...draft.phases, { do: 'walk', scope: 'whole', until: 'stuck' }],
+    });
   };
 
   // --- shared bits --------------------------------------------------------
@@ -245,7 +453,7 @@ export default function App() {
     </button>
   );
 
-  const tabButton = (value: 'solve' | 'formulas', label: string) => (
+  const tabButton = (value: 'solve' | 'formulas' | 'strategies', label: string) => (
     <button
       onClick={() => setTab(value)}
       style={BUTTON(tab === value ? '#22c55e' : '#334155', tab === value ? '#0f172a' : '#cbd5e1')}
@@ -283,6 +491,7 @@ export default function App() {
       <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
         {tabButton('solve', 'Solve')}
         {tabButton('formulas', `Formulas${counts.needs_review ? ` (${counts.needs_review} to check)` : ''}`)}
+        {tabButton('strategies', 'Strategies')}
       </div>
 
       {tab === 'solve' ? (
@@ -314,6 +523,18 @@ export default function App() {
             {error && <p style={{ color: '#ef4444', marginTop: '6px' }}>{error}</p>}
           </div>
 
+          {/* How the question was understood -- only for question forms. */}
+          {reading && (
+            <div style={{ ...CARD('#38bdf8'), marginBottom: '14px' }}>
+              <span style={{ color: '#7dd3fc', fontWeight: 600 }}>
+                Reading this as: {reading.intent.toUpperCase()}
+              </span>
+              <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>
+                {' '}— because {reading.explanation}
+              </span>
+            </div>
+          )}
+
           {/* Methods live in the flow now: the main route, or under
               "Other ways" below -- there is no button bar. */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -322,7 +543,7 @@ export default function App() {
 
           {/* Other routes that finish at exactly the same answer, so a
               student can compare ways of doing the same question. */}
-          {alternatives.length > 0 && (
+          {SHOW_ALTERNATIVE_WAYS && alternatives.length > 0 && (
             <div style={{ marginTop: '30px' }}>
               <div style={{ color: '#94a3b8', marginBottom: '12px', fontWeight: 600 }}>
                 Other ways to reach the same answer:
@@ -343,7 +564,7 @@ export default function App() {
             </div>
           )}
         </>
-      ) : (
+      ) : tab === 'formulas' ? (
         <>
           {/* --- the formula book / review queue --- */}
           <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
@@ -477,6 +698,207 @@ export default function App() {
 
             {entries.length === 0 && !formulaError && (
               <p style={{ color: '#94a3b8' }}>Nothing found.</p>
+            )}
+          </div>
+
+          {/* "Plug the strategy here": simplifications SymPy found that
+              our step-by-step strategies cannot demonstrate yet. Each row
+              is a formula or strategy we could add. */}
+          {gaps.length > 0 && (
+            <div style={{ marginTop: '28px' }}>
+              <div style={{ color: '#facc15', fontWeight: 600, marginBottom: '6px' }}>
+                Strategies we are missing ({gaps.length})
+              </div>
+              <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '10px' }}>
+                SymPy found these simpler forms, but no formula of ours reaches
+                them yet -- each is a candidate for the next formula batch.
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {gaps.map((gap) => (
+                  <div key={gap.target} style={CARD('#f97316')}>
+                    <MathBlock math={gap.target} />
+                    <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '4px' }}>
+                      from: <MathBlock math={gap.example} /> tried: {gap.tried || '—'} · seen {gap.hits}×
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {/* --- the strategies page: list + add/edit panel --- */}
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+            <button onClick={startAddStrategy} style={BUTTON('#22c55e')}>
+              Add strategy
+            </button>
+            <span style={{ fontSize: '0.85rem', color: '#94a3b8', alignSelf: 'center' }}>
+              {strategies.length} strategies · instant save
+            </span>
+          </div>
+
+          {strategyError && <p style={{ color: '#ef4444' }}>{strategyError}</p>}
+
+          {/* Add / Edit panel -- appears under the tab while open. */}
+          {draft && (
+            <div style={{ ...CARD('#38bdf8'), marginBottom: '14px' }}>
+              <strong style={{ color: '#f8fafc' }}>
+                {draft.id === null ? 'New strategy' : 'Edit strategy'}
+              </strong>
+
+              <div style={{ marginTop: '10px' }}>
+                <label style={{ display: 'block', marginBottom: '4px', color: '#94a3b8', fontSize: '0.85rem' }}>
+                  Name
+                </label>
+                <input
+                  type="text"
+                  value={draft.name}
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                  style={INPUT}
+                />
+              </div>
+
+              <div style={{ marginTop: '10px' }}>
+                <label style={{ display: 'block', marginBottom: '4px', color: '#94a3b8', fontSize: '0.85rem' }}>
+                  Form (the shape it matches)
+                </label>
+                <select
+                  value={draft.form}
+                  onChange={(e) => setDraft({ ...draft, form: e.target.value })}
+                  style={SELECT}
+                >
+                  {(vocab?.forms ?? []).map((form) => (
+                    <option key={form} value={form}>
+                      {form}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={{ marginTop: '10px' }}>
+                <label style={{ display: 'block', marginBottom: '4px', color: '#94a3b8', fontSize: '0.85rem' }}>
+                  Phases (run in this order)
+                </label>
+                {draft.phases.map((phase, index) => (
+                  <div
+                    key={index}
+                    style={{ display: 'flex', gap: '6px', marginTop: '6px', alignItems: 'center' }}
+                  >
+                    <span style={{ color: '#94a3b8', fontSize: '0.8rem', width: '18px' }}>
+                      {index + 1}.
+                    </span>
+                    <select
+                      value={phase.do}
+                      onChange={(e) => setPhaseField(index, 'do', e.target.value)}
+                      style={SELECT}
+                    >
+                      {(vocab?.dos ?? []).map((op) => (
+                        <option key={op} value={op}>
+                          {op}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={phase.scope}
+                      onChange={(e) => setPhaseField(index, 'scope', e.target.value)}
+                      style={SELECT}
+                    >
+                      {(vocab?.scopes ?? []).map((scope) => (
+                        <option key={scope} value={scope}>
+                          {scope}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={phase.until}
+                      onChange={(e) => setPhaseField(index, 'until', e.target.value)}
+                      style={SELECT}
+                    >
+                      {(vocab?.untils ?? []).map((until) => (
+                        <option key={until} value={until}>
+                          {until}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() => removePhase(index)}
+                      title="Remove this phase"
+                      style={BUTTON('#ef4444', '#fff')}
+                    >
+                      −
+                    </button>
+                  </div>
+                ))}
+                <button
+                  onClick={addPhase}
+                  style={{ ...BUTTON('#334155', '#cbd5e1'), marginTop: '8px' }}
+                >
+                  Add phase
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px', marginTop: '14px' }}>
+                <button onClick={saveStrategy} style={BUTTON('#22c55e')}>
+                  Save
+                </button>
+                <button onClick={closeStrategyPanel} style={BUTTON('#334155', '#cbd5e1')}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+            {strategies.map((strategy) => (
+              <div key={strategy.id} style={CARD('#a78bfa')}>
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: '8px',
+                    alignItems: 'center',
+                    marginBottom: '6px',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <strong style={{ color: '#f8fafc' }}>{strategy.name}</strong>
+                  <span style={BADGE('#38bdf8')}>{strategy.form}</span>
+                  <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                    used {strategy.usage_count}×
+                  </span>
+                </div>
+
+                <ol
+                  style={{
+                    margin: '6px 0',
+                    paddingLeft: '20px',
+                    color: '#cbd5e1',
+                    fontSize: '0.85rem',
+                  }}
+                >
+                  {strategy.phases.map((phase, index) => (
+                    <li key={index} style={{ marginBottom: '2px' }}>
+                      {phase.do} · {phase.scope} · until {phase.until}
+                    </li>
+                  ))}
+                </ol>
+
+                <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                  <button onClick={() => startEditStrategy(strategy)} style={BUTTON('#38bdf8')}>
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => deleteStrategy(strategy)}
+                    style={BUTTON('#ef4444', '#fff')}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            {strategies.length === 0 && !strategyError && (
+              <p style={{ color: '#94a3b8' }}>No strategies yet.</p>
             )}
           </div>
         </>

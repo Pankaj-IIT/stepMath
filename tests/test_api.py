@@ -205,3 +205,13 @@ def test_trig_equation_gets_its_general_solution():
     assert body["final"] == "x = \\pi n"
     # the step also shows the formula it came from, e.g. sin(t) = 0
     assert "\\sin" in body["steps"][-1]["formula"]
+
+
+def test_solve_accepts_an_explicit_target(sample_formulas):
+    response = client.post(
+        "/api/solve",
+        json={"expression": "sin(2*x)", "mode": "simplify",
+              "target": "2*sin(x)*cos(x)"},
+    )
+    assert response.status_code == 200
+    assert response.json()["steps"][-1]["name"] == "Double Angle for Sine"

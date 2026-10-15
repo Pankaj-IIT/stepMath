@@ -29,14 +29,23 @@ def verify_identity(left: Expr, right: Expr) -> Tuple[str, str]:
     difference = left - right
     attempts = []
 
-    # Tried in order, from quick to heavy. The last one rewrites everything
-    # into sin/cos, which is what finally cracks cotangent and tangent
-    # formulas like  cot(A+B) = (cotA cotB - 1)/(cotB + cotA).
+    # Tried in order, from quick to heavy. The FIRST attempt is the plain
+    # check  simplify(left - right)  -- when it says 0 we are done, and no
+    # rewrite is ever needed (plain pass preferred).
+    #
+    # The SECOND attempt is the FALLBACK for when the plain check alone
+    # cannot prove it: rewrite both sides into sin and cos and try again,
+    #  simplify(_to_sin_cos(left - right)) == 0  -> pass. That is what
+    # finally cracks cotangent and tangent formulas like
+    #     cot(A+B) = (cotA cotB - 1)/(cotB + cotA)
+    #     tan(a) + cot(a) = 2/sin(2a)
+    # (whose plain difference SymPy leaves standing as tan + 1/tan - ...).
+    # The heavier trig passes follow, unchanged.
     for attempt in (lambda e: simplify(e),
+                    lambda e: simplify(_to_sin_cos(e)),
                     lambda e: trigsimp(e),
                     lambda e: simplify(trigsimp(e)),
-                    lambda e: simplify(expand_trig(e)),
-                    lambda e: simplify(_to_sin_cos(e))):
+                    lambda e: simplify(expand_trig(e))):
         try:
             result = attempt(difference)
         except Exception:

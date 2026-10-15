@@ -14,17 +14,22 @@ Then the React dev server can ask it, through the /api proxy in vite.config.ts:
     400 -> { "error": "..." }   (the message shown under the input box)
 """
 
+import json
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from src.algebra.latex import to_latex
+from src.algebra import strategies as strategy_module
 from src.algebra.parser import parse_equation, parse_expression
 from src.algebra.solver import solve_equation
-from src.algebra.steps import alternative_ways, simplify_steps
+from src.algebra.steps import simplify_steps
+from src.intelligence.handlers import dispatch
+from src.intelligence.reading import read_question
 from src.knowledge import runner as method_runner
 from src.knowledge import store
+from src.knowledge.ops import OPERATIONS
 
 app = FastAPI(title="Math Step Solver API", version="1.0")
 
@@ -41,6 +46,7 @@ app.add_middleware(
 class SolveRequest(BaseModel):
     expression: str  # what the user typed, e.g. "2*x + 3*x + 5 - 1"
     mode: str = "simplify"  # "simplify" or "solve"
+    target: str | None = None  # the answer to reach; defaults to simplify()
 
 
 class Step(BaseModel):
@@ -85,15 +91,85 @@ class GroupList(BaseModel):
     groups: list[dict]  # {name, description, count}
 
 
+class GapList(BaseModel):
+    """Simplifications SymPy found that our strategies cannot reach yet."""
+    gaps: list[dict]  # {target, example, tried, hits}
+
+
+class StrategyIn(BaseModel):
+    """What the Strategies tab saves (both add and edit)."""
+    name: str
+    form: str
+    phases: list[dict]  # validated by strategies.validate_strategy, shared
+                        # with the importer, so the two can never disagree
+
+
+class StrategyOut(BaseModel):
+    """One strategy row, as the Strategies tab shows it."""
+    id: int
+    name: str
+    form: str
+    phases: list[dict]
+    verified: int
+    usage_count: int
+
+
+class StrategyList(BaseModel):
+    strategies: list[StrategyOut]
+
+
+class StrategyVocabulary(BaseModel):
+    """The choices the phases builder offers (from the interpreter)."""
+    forms: list[str]
+    dos: list[str]      # "walk" plus every known operation
+    scopes: list[str]
+    untils: list[str]
+
+
 class MethodRunRequest(BaseModel):
     expression: str
     id: int  # which method (entry id) to run
+
+
+class AskRequest(BaseModel):
+    question: str  # the whole typed question, e.g. "prove that sin(x)^2 + ... = 1"
+
+
+class AskResponse(SolveResponse):
+    """What the question layer answers: the direction plus its steps."""
+    intent: str  # simplify | prove | solve | ...
+    explanation: str  # WHY it read the question that way
+    proven: bool | None = None  # only for intent=prove
 
 
 @app.get("/api/health")
 def health() -> dict:
     """Used by the UI to check that the Python server is running."""
     return {"status": "ok"}
+
+
+@app.post("/api/ask", response_model=AskResponse)
+def ask(request: AskRequest) -> "AskResponse | JSONResponse":
+    """The question layer: read the question, pick a direction, run it.
+
+    The reading is deterministic (no AI): plain rules say whether this is
+    a simplify/prove/solve question and WHY, then the matching handler
+    produces the steps.
+    """
+    try:
+        reading = read_question(request.question)
+        result = dispatch(reading)
+        return AskResponse(
+            steps=result["steps"],
+            final=result["final"],
+            alternatives=[AlternativeWay(**way)
+                          for way in result.get("alternatives", [])],
+            intent=result["intent"],
+            explanation=result["explanation"],
+            proven=result.get("proven"),
+        )
+    except Exception as error:  # ValueError, NotSupported, parse errors...
+        return _error(error)
 
 
 @app.post("/api/solve", response_model=SolveResponse)
@@ -106,9 +182,10 @@ def solve(request: SolveRequest) -> "SolveResponse | JSONResponse":
             steps = solve_equation(left, right)
         elif request.mode == "simplify":
             expression = parse_expression(request.expression)
-            steps = simplify_steps(expression)
-            # Other routes that finish at the same answer (simplify only).
-            ways = alternative_ways(expression)
+            target = (parse_expression(request.target)
+                      if request.target else None)
+            steps = simplify_steps(expression, target=target)
+            # alternatives held for a later version (user: one solution for now)
         else:
             raise ValueError(f'Unknown mode "{request.mode}" (use simplify or solve).')
 
@@ -146,6 +223,35 @@ def _entry_out(row, tags: "list | None" = None) -> Entry:
     )
 
 
+def _strategy_out(row) -> StrategyOut:
+    """One strategy row as the Strategies tab needs to show it.
+
+    `steps` is either the bare phase list (everything written since the
+    strategies table existed) or a whole document dict with a "phases"
+    key -- the same duality _run_phases accepts at solve time, kept here
+    as a defensive unwrap.
+
+    `verified` is a compatibility shim: strategies are trusted on save
+    (they have no left/right to prove), and the strategies table has no
+    review-queue column, so every row answers 1.
+    """
+    try:
+        doc = json.loads(row["steps"] or "[]")
+    except (TypeError, json.JSONDecodeError):
+        doc = None  # a broken row still lists (its phases render empty)
+    phases = doc.get("phases") if isinstance(doc, dict) else doc
+    if not isinstance(phases, list):
+        phases = []
+    return StrategyOut(
+        id=row["id"],
+        name=row["name"],
+        form=row["form"],
+        phases=phases,
+        verified=1,
+        usage_count=row["usage_count"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # The formula database: browse, search, families, and review
 # ---------------------------------------------------------------------------
@@ -173,6 +279,12 @@ def list_groups() -> GroupList:
     return GroupList(groups=store.list_groups(store.get_connection()))
 
 
+@app.get("/api/gaps", response_model=GapList)
+def gaps() -> GapList:
+    """The "plug the strategy here" list: targets we cannot explain yet."""
+    return GapList(gaps=[dict(row) for row in store.list_gaps()])
+
+
 @app.post("/api/entries/{entry_id}/approve")
 def approve_entry(entry_id: int) -> dict:
     """A human says "this one is right" -> it starts being used."""
@@ -191,6 +303,89 @@ def reject_entry(entry_id: int) -> dict:
     if store.get_entry(connection, entry_id) is None:
         return _error(ValueError("No such formula."))
     store.delete_entry(connection, entry_id)
+    connection.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Strategies: view, create, edit, delete (the Strategies tab).
+# Saving is INSTANT -- validate, write, done (no review queue: a strategy
+# has no left/right to prove, and the interpreter itself refuses rows
+# whose vocabulary it does not know).
+# ---------------------------------------------------------------------------
+@app.get("/api/strategies", response_model=StrategyList)
+def list_strategies() -> StrategyList:
+    """Every strategy, in id order (what the Strategies tab lists)."""
+    rows = store.list_strategies(store.get_connection())
+    return StrategyList(strategies=[_strategy_out(row) for row in rows])
+
+
+@app.get("/api/strategy-meta", response_model=StrategyVocabulary)
+def strategy_meta() -> StrategyVocabulary:
+    """The vocabulary a phase may use: forms, ops, scopes, untils."""
+    return StrategyVocabulary(
+        forms=sorted(strategy_module._FORMS),
+        dos=["walk", *sorted(OPERATIONS)],
+        scopes=["whole", "term", "combination", "bracket"],
+        untils=["stuck", "once"],
+    )
+
+
+@app.post("/api/strategies")
+def create_strategy(request: StrategyIn) -> dict:
+    """Instant save: validate with the shared checker, then insert."""
+    try:
+        name = request.name.strip()
+        if not name:
+            raise ValueError("a strategy needs a name")
+        form = request.form.strip()
+        strategy_module.validate_strategy(form, request.phases)
+
+        steps_json = json.dumps(request.phases, ensure_ascii=False)
+        connection = store.get_connection()
+        # A duplicate (same form + phases) raises the friendly ValueError
+        # here, which the except below turns into the 400 the POST has
+        # always answered with.
+        strategy_id = store.insert_strategy(connection, name, form,
+                                             steps_json, source="ui")
+        connection.commit()
+        return {"id": strategy_id}
+
+    except Exception as error:  # ValueError from the shared validator...
+        return _error(error)
+
+
+@app.put("/api/strategies/{entry_id}")
+def update_strategy(entry_id: int, request: StrategyIn) -> dict:
+    """Instant save over an existing row: update, never re-insert."""
+    try:
+        name = request.name.strip()
+        if not name:
+            raise ValueError("a strategy needs a name")
+        form = request.form.strip()
+        strategy_module.validate_strategy(form, request.phases)
+
+        connection = store.get_connection()
+        row = store.get_strategy(connection, entry_id)
+        if row is None:
+            return _error(ValueError("No such strategy."))
+
+        steps_json = json.dumps(request.phases, ensure_ascii=False)
+        store.update_strategy(connection, entry_id, name, form, steps_json)
+        connection.commit()
+        return {"ok": True, "id": entry_id}
+
+    except Exception as error:
+        return _error(error)
+
+
+@app.delete("/api/strategies/{entry_id}")
+def delete_strategy(entry_id: int) -> dict:
+    """Gone: the row is deleted for good."""
+    connection = store.get_connection()
+    if store.get_strategy(connection, entry_id) is None:
+        return _error(ValueError("No such strategy."))
+    store.delete_strategy(connection, entry_id)
     connection.commit()
     return {"ok": True}
 
